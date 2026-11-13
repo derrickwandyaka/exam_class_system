@@ -5,6 +5,9 @@ import { useToast } from './Toast';
 import Avatar from './Avatar';
 
 const SCHOOLS = ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other'];
+const ACADEMIC_LEVELS = ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD'];
+const PROGRAM_MODES = ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE'];
+const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const DEGREE_PROGRAMS = [
   // School of Computing (SCI)
   'BCS', 'BIST', 'DIST', 'BCDF', 'DCS', 'DIT', 'MIST', 'SCIAD',
@@ -287,6 +290,7 @@ function AuthScreen({ onAuth }) {
     firstName: '',
     lastName: '',
     studentNumber: '',
+    academicLevel: 'Degree',
     program: 'DAY',
     school: 'SCI',
     degreeProgram: '',
@@ -302,7 +306,7 @@ function AuthScreen({ onAuth }) {
     let active = true;
     setRegistrationPrograms([]);
     setLoadingRegistrationPrograms(true);
-    api(`/registration-programs?school=${encodeURIComponent(registration.school)}`)
+    api(`/registration-programs?school=${encodeURIComponent(registration.school)}&academicLevel=${encodeURIComponent(registration.academicLevel)}`)
       .then((programs) => {
         if (!Array.isArray(programs)) {
           throw new Error('The server returned an invalid degree program list.');
@@ -316,7 +320,7 @@ function AuthScreen({ onAuth }) {
         if (active) setLoadingRegistrationPrograms(false);
       });
     return () => { active = false; };
-  }, [tab, registration.school, notify]);
+  }, [tab, registration.school, registration.academicLevel, notify]);
 
   function changeTab(nextTab) {
     setTab(nextTab);
@@ -387,11 +391,26 @@ function AuthScreen({ onAuth }) {
                 onChange={(event) => setRegistration({ ...registration, studentNumber: event.target.value })} />
             </label>
             <div className="row">
-              <label>Program
+              <label>Academic level
+                <select value={registration.academicLevel}
+                  onChange={(event) => {
+                    setRegistration({
+                      ...registration,
+                      academicLevel: event.target.value,
+                      degreeProgram: ''
+                    });
+                    setRegistrationPrograms([]);
+                    setLoadingRegistrationPrograms(true);
+                  }}>
+                  {ACADEMIC_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+                </select>
+              </label>
+              <label>Program mode
                 <select value={registration.program}
                   onChange={(event) => setRegistration({ ...registration, program: event.target.value })}>
-                  <option value="DAY">DAY</option>
-                  <option value="WEEKEND">WEEKEND</option>
+                  {PROGRAM_MODES.map((mode) => (
+                    <option key={mode} value={mode}>{mode.charAt(0) + mode.slice(1).toLowerCase()}</option>
+                  ))}
                 </select>
               </label>
               <label>School
@@ -480,7 +499,6 @@ function StudentApp({ onLogout }) {
   const [busyRegistrationId, setBusyRegistrationId] = useState(null);
   const [unitSearch, setUnitSearch] = useState('');
   const debouncedExamSearch = useDebouncedValue(examSearch);
-  const debouncedClassSearch = useDebouncedValue(classSearch);
   const debouncedUnitSearch = useDebouncedValue(unitSearch);
   const [uploadingPicture, setUploadingPicture] = useState(false);
   const [deletingAccount, setDeletingAccount] = useState(false);
@@ -496,7 +514,7 @@ function StudentApp({ onLogout }) {
         api('/course-units'),
         api(`/course-units?search=${encodeURIComponent(debouncedUnitSearch)}`),
         api(`/exams?search=${encodeURIComponent(debouncedExamSearch)}`),
-        api(`/classes?search=${encodeURIComponent(debouncedClassSearch)}`)
+        api('/classes')
       ]);
       setStudent(profile);
       setUnits(availableUnits);
@@ -527,32 +545,22 @@ function StudentApp({ onLogout }) {
   }, [debouncedExamSearch, notify]);
 
   useEffect(() => {
-    let active = true;
-    api(`/classes?search=${encodeURIComponent(debouncedClassSearch)}`)
-      .then((result) => { if (active) setClasses(result); })
-      .catch((error) => { if (active) notify(error.message || 'Could not search classes.', 'error'); });
-    return () => { active = false; };
-  }, [debouncedClassSearch, notify]);
-
-  useEffect(() => {
     if (tab !== 'classes') return undefined;
     let active = true;
     const refreshClasses = async () => {
       try {
-        const result = await api(`/classes?search=${encodeURIComponent(debouncedClassSearch)}`);
+        const result = await api('/classes');
         if (active) setClasses(result);
       } catch (error) {
-        if (active) notify(error.message || 'Could not refresh your classes.', 'error');
+        if (active) notify(error.message || 'Could not refresh your lecture schedule.', 'error');
       }
     };
-
-    refreshClasses();
-    const refreshTimer = window.setInterval(refreshClasses, 30000);
+    const timer = window.setInterval(refreshClasses, 30000);
     return () => {
       active = false;
-      window.clearInterval(refreshTimer);
+      window.clearInterval(timer);
     };
-  }, [tab, debouncedClassSearch, notify]);
+  }, [tab, notify]);
 
   useEffect(() => {
     let active = true;
@@ -678,6 +686,36 @@ function StudentApp({ onLogout }) {
     return groups;
   }, {});
   const sortedExamDates = Object.keys(examsByDate).sort();
+  const today = new Date();
+  const todayDay = new Intl.DateTimeFormat(undefined, { weekday: 'long' }).format(today);
+  const todayDate = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, '0'),
+    String(today.getDate()).padStart(2, '0')
+  ].join('-');
+  const todayClasses = classes.filter((classSession) =>
+    classSession.dayOfWeek === todayDay && classSession.startTime
+  );
+  const todayExams = exams.filter((exam) => exam.examDate === todayDate);
+  const todaySchedule = [
+    ...todayClasses.map((classSession) => ({ ...classSession, type: 'lecture' })),
+    ...todayExams.map((exam) => ({ ...exam, type: 'exam' }))
+  ].sort((first, second) =>
+    (first.type === 'exam' ? 0 : 1) - (second.type === 'exam' ? 0 : 1) ||
+    first.startTime.localeCompare(second.startTime)
+  );
+  const visibleClasses = classes.filter((classSession) => {
+    const search = classSearch.trim().toLowerCase();
+    return !search || [
+      classSession.code, classSession.courseName, classSession.lecturerName,
+      classSession.room, classSession.dayOfWeek
+    ].some((value) => String(value || '').toLowerCase().includes(search));
+  });
+  const classGroups = WEEK_DAYS.map((day) => ({
+    day,
+    sessions: visibleClasses.filter((classSession) => classSession.dayOfWeek === day)
+  })).filter((group) => group.sessions.length);
+  const unscheduledClasses = visibleClasses.filter((classSession) => !classSession.dayOfWeek);
   const normalizedUnitSearch = unitSearch.trim();
   const visibleUnits = courseUnitResults;
   const matchingCourseChats = student
@@ -698,7 +736,7 @@ function StudentApp({ onLogout }) {
         <div>
           <div className="hello">Hi, {student?.firstName || 'Student'}</div>
           {student && <div className="muted small">
-            {student.studentNumber} · {student.school} · Year {student.yearOfStudy} · Semester {student.semester}
+            {student.studentNumber} · {student.school} · {student.academicLevel} · Year {student.yearOfStudy} · Semester {student.semester}
           </div>}
         </div>
         <div className="topbar-actions">
@@ -714,13 +752,42 @@ function StudentApp({ onLogout }) {
       {student && (
         <div className="degree-summary">
           <span>Showing exams for</span>
-          <strong>{student.degreeProgram} · Year {student.yearOfStudy} · Semester {student.semester}</strong>
+          <strong>{student.academicLevel} · {student.degreeProgram} · {student.program} · Year {student.yearOfStudy} · Semester {student.semester}</strong>
         </div>
       )}
 
+      <section className="card today-schedule-card" aria-labelledby="today-schedule-title">
+        <div className="today-schedule-heading">
+          <div>
+            <span className="eyebrow">Daily overview</span>
+            <h2 id="today-schedule-title">Today’s Schedule</h2>
+          </div>
+          <time>{new Intl.DateTimeFormat(undefined, {
+            weekday: 'long', day: 'numeric', month: 'long'
+          }).format(today)}</time>
+        </div>
+        {!todaySchedule.length ? (
+          <p className="muted small">No lectures or exams scheduled for today.</p>
+        ) : (
+          <div className="today-schedule-list">
+            {todaySchedule.map((item) => (
+              <article className={`today-schedule-item ${item.type}`} key={`${item.type}-${item.id}`}>
+                <time>{formatTime(item.startTime)}–{formatTime(item.endTime)}</time>
+                <div>
+                  {item.type === 'exam' && <b className="today-exam-alert">EXAM TODAY</b>}
+                  <strong>{item.type === 'exam' ? `${item.code} — ${item.courseName}` : item.courseName}</strong>
+                  <span>{item.type === 'exam' ? `Room/Hall: ${item.room}` : `Lecture · ${item.room}`}</span>
+                  {item.lecturerName && <b>Lecturer: {item.lecturerName}</b>}
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
       <div className="tabs" role="tablist" aria-label="Student timetable">
         <button type="button" className={tab === 'exams' ? 'tab active' : 'tab'} onClick={() => setTab('exams')}>My exams</button>
-        <button type="button" className={tab === 'classes' ? 'tab active' : 'tab'} onClick={() => setTab('classes')}>My classes</button>
+        <button type="button" className={tab === 'classes' ? 'tab active' : 'tab'} onClick={() => setTab('classes')}>My Lectures</button>
         <button type="button" className={tab === 'units' ? 'tab active' : 'tab'} onClick={() => setTab('units')}>
           Course units ({units.filter((unit) => unit.registered).length})
         </button>
@@ -796,29 +863,54 @@ function StudentApp({ onLogout }) {
 
       {tab === 'classes' && (
         <section className="card class-schedule-card">
-          <h2>My weekly classes</h2>
+          <h2>My Lecture Timetable</h2>
           <SearchBar value={classSearch} onChange={setClassSearch}
             placeholder="Search course, lecturer, or room…" label="Search my classes" />
-          {!classes.length ? (
-            classSearch
-              ? noSearchResults(classSearch)
-              : <p className="muted">No lecturer-assigned courses match your school, degree, year, and semester yet.</p>
+          {!visibleClasses.length ? (
+            classSearch ? noSearchResults(classSearch) : (
+              <p className="muted">Register for course units to see your weekly lecture timetable here.</p>
+            )
           ) : (
-            <div className="class-schedule-list">
-              {classes.map((classSession) => (
-                <article className="class-schedule-item" key={classSession.id || `course-${classSession.courseUnitId}`}>
-                  <div className="class-day">{classSession.dayOfWeek || 'Schedule pending'}</div>
-                  <div className="class-info">
-                    <strong>{classSession.code} — {classSession.courseName}</strong>
-                    {classSession.startTime && classSession.endTime ? (
-                      <span>{formatTime(classSession.startTime)}–{formatTime(classSession.endTime)} · {classSession.room}</span>
-                    ) : (
-                      <span className="muted small">Weekly time and room have not been posted yet.</span>
-                    )}
-                    {classSession.lecturerName && <span className="muted small">Lecturer: {classSession.lecturerName}</span>}
+            <div className="lecture-timetable">
+              {classGroups.map((group) => (
+                <section className="lecture-day-group" key={group.day}>
+                  <h3>{group.day}</h3>
+                  <div className="class-schedule-list">
+                    {group.sessions.map((classSession) => (
+                      <article className="class-schedule-item lecture-card" key={classSession.id}>
+                        <time className="lecture-time">
+                          {formatTime(classSession.startTime)}–{formatTime(classSession.endTime)}
+                        </time>
+                        <div className="class-info">
+                          <strong>{classSession.code} — {classSession.courseName}</strong>
+                          <span>Room: {classSession.room}</span>
+                          {classSession.lecturerName && (
+                            <b className="lecture-lecturer">Lecturer: {classSession.lecturerName}</b>
+                          )}
+                        </div>
+                      </article>
+                    ))}
                   </div>
-                </article>
+                </section>
               ))}
+              {unscheduledClasses.length > 0 && (
+                <section className="lecture-day-group">
+                  <h3>Schedule pending</h3>
+                  <div className="class-schedule-list">
+                    {unscheduledClasses.map((classSession) => (
+                      <article className="class-schedule-item lecture-card" key={`pending-${classSession.courseUnitId}`}>
+                        <div className="class-info">
+                          <strong>{classSession.code} — {classSession.courseName}</strong>
+                          <span className="muted small">Weekly time and room have not been posted yet.</span>
+                          {classSession.lecturerName && (
+                            <b className="lecture-lecturer">Lecturer: {classSession.lecturerName}</b>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              )}
             </div>
           )}
         </section>
@@ -878,6 +970,7 @@ function StudentApp({ onLogout }) {
                     <strong>{unit.code}</strong>
                     <div className="muted small">{unit.name}</div>
                     <div className="unit-level-badges">
+                      <span className="unit-level-badge">{unit.academicLevel}</span>
                       <span className={`unit-level-badge${outsideDefaultYear ? ' outside-default' : ''}`}>
                         {year ? `Year ${year}` : 'All years'}
                       </span>
@@ -995,8 +1088,9 @@ function ExamSessionCard({ session, onDelete, busyExamId, onComplete, busyRegist
     <article className={`exam-card${sessionCompleted ? ' completed' : ''}`}>
       <div className="exam-main">
         <div className="session-heading">
+          <div className="session-date">{formatDate(session.examDate)}</div>
           <div className="session-time">{formatTime(session.startTime)}–{formatTime(session.endTime)}</div>
-          <div className="session-room">{session.room}</div>
+          <div className="session-room">Room/Hall: {session.room}</div>
         </div>
         <ul className="session-courses">
           {session.courses.map((course) => (
@@ -1011,8 +1105,8 @@ function ExamSessionCard({ session, onDelete, busyExamId, onComplete, busyRegist
                     {course.degreeProgram === 'ALL' ? 'General' : course.degreeProgram}
                   </span>
                 )}
-                <span className={`program-badge program-${(course.program || 'BOTH').toLowerCase()}`}>
-                  {(course.program || 'BOTH') === 'BOTH' ? 'Joint' : course.program}
+                <span className="program-badge exam-program-badge">
+                  {course.program || 'BOTH'}
                 </span>
               </div>
               {course.isCompleted ? (
@@ -1263,6 +1357,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
   const [tab, setTab] = useState('manage');
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState('');
+  const [editingClassId, setEditingClassId] = useState(null);
   const [busyExamId, setBusyExamId] = useState(null);
   const [broadcastType, setBroadcastType] = useState('global');
   const [broadcastSchool, setBroadcastSchool] = useState('SCI');
@@ -1282,14 +1377,20 @@ function AdminApp({ onLogout, superAdmin = false }) {
     : `${superAdmin ? broadcastSchool : (adminIdentity?.school || broadcastSchool)}-${broadcastDegree}-${broadcastProgram}-Y${broadcastYear}-S${broadcastSemester}`;
   const isSuperAdminUser = superAdmin || adminIdentity?.role === 'SUPER_ADMIN';
   const [unitForm, setUnitForm] = useState({
-    code: '', name: '', school: 'SCI', degreeProgram: '', yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
+    code: '', name: '', school: 'SCI', degreeProgram: '', academicLevel: 'Degree',
+    yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
   });
   const [lecturerForm, setLecturerForm] = useState({
     name: '', email: '', password: '', school: 'SCI'
   });
   const [classForm, setClassForm] = useState({
-    courseUnitId: '', dayOfWeek: 'Monday', startTime: '', endTime: '', room: ''
+    courseUnitId: '', lecturerId: '', dayOfWeek: 'Monday',
+    startTime: '', endTime: '', room: '', program: 'BOTH'
   });
+  const selectedScheduleCourse = units.find((unit) => String(unit.id) === classForm.courseUnitId);
+  const scheduleLecturers = selectedScheduleCourse
+    ? lecturers.filter((lecturer) => lecturer.school === selectedScheduleCourse.school)
+    : [];
   const [examForm, setExamForm] = useState({
     courseUnitIds: [], examDate: '', startTime: '', endTime: '', room: '', program: 'BOTH'
   });
@@ -1420,7 +1521,8 @@ function AdminApp({ onLogout, superAdmin = false }) {
       });
       setUnitForm({
         code: '', name: '', school: adminIdentity?.school || 'SCI',
-        degreeProgram: '', yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
+        degreeProgram: '', academicLevel: 'Degree',
+        yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
       });
       notify('Course unit added.');
       await load();
@@ -1492,18 +1594,59 @@ function AdminApp({ onLogout, superAdmin = false }) {
     event.preventDefault();
     setBusyAction('class');
     try {
-      await api('/admin/classes', {
-        method: 'POST',
+      await api(editingClassId ? `/admin/classes/${editingClassId}` : '/admin/classes', {
+        method: editingClassId ? 'PUT' : 'POST',
         body: JSON.stringify({
           ...classForm,
-          courseUnitId: Number(classForm.courseUnitId)
+          courseUnitId: Number(classForm.courseUnitId),
+          lecturerId: Number(classForm.lecturerId)
         })
       });
-      setClassForm({ courseUnitId: '', dayOfWeek: 'Monday', startTime: '', endTime: '', room: '' });
-      notify('Class session scheduled.');
+      setClassForm({
+        courseUnitId: '', lecturerId: '', dayOfWeek: 'Monday',
+        startTime: '', endTime: '', room: '', program: 'BOTH'
+      });
+      notify(editingClassId ? 'Lecture schedule updated.' : 'Lecture scheduled.');
+      setEditingClassId(null);
       await load();
     } catch (requestError) {
       notify(requestError.message, 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  function editClass(classSession) {
+    setEditingClassId(classSession.id);
+    setClassForm({
+      courseUnitId: String(classSession.courseUnitId),
+      lecturerId: String(classSession.lecturerId || ''),
+      dayOfWeek: classSession.dayOfWeek,
+      startTime: formatTime(classSession.startTime),
+      endTime: formatTime(classSession.endTime),
+      room: classSession.room,
+      program: classSession.program || 'BOTH'
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function cancelClassEdit() {
+    setEditingClassId(null);
+    setClassForm({
+      courseUnitId: '', lecturerId: '', dayOfWeek: 'Monday',
+      startTime: '', endTime: '', room: '', program: 'BOTH'
+    });
+  }
+
+  async function deleteClass(scheduleId) {
+    setBusyAction(`delete-class-${scheduleId}`);
+    try {
+      await api(`/admin/classes/${scheduleId}`, { method: 'DELETE' });
+      if (editingClassId === scheduleId) cancelClassEdit();
+      notify('Lecture schedule deleted.');
+      await load();
+    } catch (requestError) {
+      notify(requestError.message || 'Could not delete the lecture schedule.', 'error');
     } finally {
       setBusyAction('');
     }
@@ -1587,7 +1730,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
             onClick={() => setTab('admins')}>Manage admins</button>
         )}
         <button type="button" className={tab === 'manage' ? 'tab active' : 'tab'} onClick={() => setTab('manage')}>Timetable management</button>
-        <button type="button" className={tab === 'classes' ? 'tab active' : 'tab'} onClick={() => setTab('classes')}>Manage classes</button>
+        <button type="button" className={tab === 'classes' ? 'tab active' : 'tab'} onClick={() => setTab('classes')}>Schedule lectures</button>
         <button type="button" className={tab === 'lecturers' ? 'tab active' : 'tab'} onClick={() => setTab('lecturers')}>Manage lecturers</button>
         <button type="button" className={tab === 'students' ? 'tab active' : 'tab'} onClick={() => setTab('students')}>Manage students</button>
         <button type="button" className={tab === 'chat' ? 'tab active' : 'tab'} onClick={() => setTab('chat')}>Chat &amp; Updates</button>
@@ -1680,8 +1823,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
                   </label>
                   <label>Program
                     <select value={broadcastProgram} onChange={(event) => setBroadcastProgram(event.target.value)}>
-                      <option value="DAY">DAY</option>
-                      <option value="WEEKEND">WEEKEND</option>
+                      {PROGRAM_MODES.map((mode) => (
+                        <option key={mode} value={mode}>{mode.charAt(0) + mode.slice(1).toLowerCase()}</option>
+                      ))}
                     </select>
                   </label>
                   <label>Year of study
@@ -1785,6 +1929,12 @@ function AdminApp({ onLogout, superAdmin = false }) {
                 {DEGREE_PROGRAMS.map((degree) => <option key={degree} value={degree} />)}
               </datalist>
             </label>
+            <label>Academic level
+              <select required value={unitForm.academicLevel}
+                onChange={(event) => setUnitForm({ ...unitForm, academicLevel: event.target.value })}>
+                {ACADEMIC_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+              </select>
+            </label>
             <label>Name
               <input required maxLength={120} placeholder="Operating Systems" value={unitForm.name}
                 onChange={(event) => setUnitForm({ ...unitForm, name: event.target.value })} />
@@ -1879,8 +2029,10 @@ function AdminApp({ onLogout, superAdmin = false }) {
               <select value={examForm.program}
                 onChange={(event) => setExamForm({ ...examForm, program: event.target.value })}>
                 <option value="BOTH">Both / joint</option>
-                <option value="DAY">Day</option>
-                <option value="WEEKEND">Weekend</option>
+                {PROGRAM_MODES.map((mode) => (
+                  <option key={mode} value={mode}>{mode.charAt(0) + mode.slice(1).toLowerCase()}</option>
+                ))}
+                <option value="ALL">All program modes</option>
               </select>
             </label>
             <button className="btn primary" disabled={busyAction === 'exam' || !examForm.courseUnitIds.length}>
@@ -2020,7 +2172,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
                   <strong>{studentRecord.firstName} {studentRecord.lastName}</strong>
                   <span>{studentRecord.studentNumber} · {studentRecord.email}</span>
                   <span className="muted small">
-                    {studentRecord.school} · {studentRecord.degreeProgram} · {studentRecord.program} · Year {studentRecord.yearOfStudy}, Semester {studentRecord.semester}
+                    {studentRecord.school} · {studentRecord.academicLevel} · {studentRecord.degreeProgram} · {studentRecord.program} · Year {studentRecord.yearOfStudy}, Semester {studentRecord.semester}
                   </span>
                 </article>
               ))}
@@ -2032,21 +2184,43 @@ function AdminApp({ onLogout, superAdmin = false }) {
       {tab === 'classes' && (
         <div className="lecturer-management">
           <section className="card">
-            <h2>Schedule a weekly class</h2>
+            <h2>{editingClassId ? 'Edit lecture schedule' : 'Schedule a weekly lecture'}</h2>
             <form className="form" onSubmit={addClass}>
               <label>Course unit
                 <select required value={classForm.courseUnitId}
-                  onChange={(event) => setClassForm({ ...classForm, courseUnitId: event.target.value })}>
+                  onChange={(event) => {
+                    const selectedUnit = units.find((unit) => String(unit.id) === event.target.value);
+                    setClassForm({
+                      ...classForm,
+                      courseUnitId: event.target.value,
+                      lecturerId: selectedUnit?.lecturerId ? String(selectedUnit.lecturerId) : ''
+                    });
+                  }}>
                   <option value="">Select a course unit</option>
                   {units.map((unit) => (
-                    <option key={unit.id} value={unit.id}>{unit.code} — {unit.name}</option>
+                    <option key={unit.id} value={unit.id}>
+                      {unit.code} — {unit.name} · {unit.academicLevel}
+                    </option>
                   ))}
                 </select>
+              </label>
+              <label>Lecturer
+                <select required value={classForm.lecturerId}
+                  disabled={!scheduleLecturers.length}
+                  onChange={(event) => setClassForm({ ...classForm, lecturerId: event.target.value })}>
+                  <option value="">Select a lecturer</option>
+                  {scheduleLecturers.map((lecturer) => (
+                    <option key={lecturer.id} value={lecturer.id}>{lecturer.name}</option>
+                  ))}
+                </select>
+                {selectedScheduleCourse && !scheduleLecturers.length && (
+                  <span className="muted small">Create a lecturer account for {selectedScheduleCourse.school} first.</span>
+                )}
               </label>
               <label>Day of week
                 <select value={classForm.dayOfWeek}
                   onChange={(event) => setClassForm({ ...classForm, dayOfWeek: event.target.value })}>
-                  {['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                  {WEEK_DAYS
                     .map((day) => <option key={day} value={day}>{day}</option>)}
                 </select>
               </label>
@@ -2064,22 +2238,51 @@ function AdminApp({ onLogout, superAdmin = false }) {
                 <input required maxLength={50} value={classForm.room}
                   onChange={(event) => setClassForm({ ...classForm, room: event.target.value })} />
               </label>
-              <button className="btn primary" disabled={busyAction === 'class' || !units.length}>
-                {busyAction === 'class' ? <><span className="spinner spinner-light" /> Scheduling…</> : 'Schedule class'}
+              <label>Target program mode
+                <select value={classForm.program}
+                  onChange={(event) => setClassForm({ ...classForm, program: event.target.value })}>
+                  <option value="BOTH">Both / all modes</option>
+                  {PROGRAM_MODES.map((mode) => (
+                    <option key={mode} value={mode}>{mode.charAt(0) + mode.slice(1).toLowerCase()}</option>
+                  ))}
+                </select>
+              </label>
+              <button className="btn primary"
+                disabled={busyAction === 'class' || !units.length || !classForm.lecturerId}>
+                {busyAction === 'class'
+                  ? <><span className="spinner spinner-light" /> Saving…</>
+                  : editingClassId ? 'Update lecture' : 'Schedule lecture'}
               </button>
+              {editingClassId && (
+                <button type="button" className="btn ghost" onClick={cancelClassEdit}>Cancel edit</button>
+              )}
             </form>
           </section>
           <section className="card">
-            <h2>Class timetable ({classes.length})</h2>
+            <h2>Scheduled lectures ({classes.length})</h2>
             {!classes.length ? <p className="muted">No weekly classes scheduled yet.</p> : (
               <div className="class-schedule-list">
                 {classes.map((classSession) => (
-                  <article className="class-schedule-item" key={classSession.id}>
+                  <article className="class-schedule-item admin-lecture-item" key={classSession.id}>
                     <div className="class-day">{classSession.dayOfWeek}</div>
                     <div className="class-info">
                       <strong>{classSession.code} — {classSession.courseName}</strong>
                       <span>{formatTime(classSession.startTime)}–{formatTime(classSession.endTime)} · {classSession.room}</span>
-                      {classSession.lecturerName && <span className="muted small">Lecturer: {classSession.lecturerName}</span>}
+                      {classSession.lecturerName && (
+                        <b className="lecture-lecturer">Lecturer: {classSession.lecturerName}</b>
+                      )}
+                      <span className="muted small">
+                        Target: {classSession.program === 'BOTH' ? 'All program modes' : classSession.program}
+                      </span>
+                    </div>
+                    <div className="lecture-actions">
+                      <button type="button" className="btn ghost small"
+                        onClick={() => editClass(classSession)}>Edit</button>
+                      <button type="button" className="btn danger-btn small"
+                        onClick={() => deleteClass(classSession.id)}
+                        disabled={busyAction === `delete-class-${classSession.id}`}>
+                        {busyAction === `delete-class-${classSession.id}` ? 'Deleting…' : 'Delete'}
+                      </button>
                     </div>
                   </article>
                 ))}

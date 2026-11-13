@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS students (
   first_name VARCHAR(50) NOT NULL,
   last_name VARCHAR(50) NOT NULL,
   student_number VARCHAR(20) NOT NULL UNIQUE,
-  program ENUM('DAY', 'WEEKEND') NOT NULL,
+  academic_level ENUM('Certificate', 'Diploma', 'Degree', 'Masters', 'PhD') NOT NULL DEFAULT 'Degree',
+  program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE') NOT NULL,
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL,
   phone_number VARCHAR(20) NULL,
   degree_program VARCHAR(30) NOT NULL DEFAULT 'UNASSIGNED',
@@ -60,13 +61,14 @@ CREATE TABLE IF NOT EXISTS course_units (
   name VARCHAR(120) NOT NULL,
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL,
   degree_program VARCHAR(30) NOT NULL DEFAULT 'UNASSIGNED',
+  academic_level ENUM('Certificate', 'Diploma', 'Degree', 'Masters', 'PhD') NOT NULL DEFAULT 'Degree',
   lecturer_id INT NULL,
   is_public BOOLEAN NOT NULL DEFAULT FALSE,
   year_of_study TINYINT UNSIGNED NOT NULL,
   semester TINYINT UNSIGNED NOT NULL,
   KEY idx_course_units_lecturer_id (lecturer_id),
   UNIQUE KEY uniq_course_offering
-    (school, degree_program, year_of_study, semester, code, name),
+    (school, degree_program, academic_level, year_of_study, semester, code, name),
   CONSTRAINT fk_course_lecturer FOREIGN KEY (lecturer_id)
     REFERENCES lecturers(id) ON DELETE SET NULL
 );
@@ -79,6 +81,8 @@ CREATE TABLE IF NOT EXISTS class_schedules (
   start_time TIME NOT NULL,
   end_time TIME NOT NULL,
   room VARCHAR(50) NOT NULL,
+  program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH') NOT NULL DEFAULT 'BOTH',
+  KEY idx_class_schedules_course_program (course_unit_id, program),
   KEY idx_class_schedules_day_time (day_of_week, start_time),
   KEY idx_class_schedules_lecturer_id (lecturer_id),
   CONSTRAINT fk_class_schedule_course FOREIGN KEY (course_unit_id)
@@ -121,7 +125,7 @@ CREATE TABLE IF NOT EXISTS exams (
   start_time TIME NOT NULL,
   end_time TIME NOT NULL,
   room VARCHAR(50) NOT NULL,
-  program ENUM('DAY', 'WEEKEND', 'BOTH') NOT NULL DEFAULT 'BOTH',
+  program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH', 'ALL') NOT NULL DEFAULT 'BOTH',
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL DEFAULT 'Other',
   source_sheet VARCHAR(50) NULL,
   source_row INT UNSIGNED NULL,
@@ -158,6 +162,7 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
+DROP PROCEDURE IF EXISTS drop_course_offering_unique;
 
 DELIMITER //
 
@@ -199,6 +204,19 @@ BEGIN
       AND non_unique = 0
   ) THEN
     ALTER TABLE course_units DROP INDEX code;
+  END IF;
+END//
+
+CREATE PROCEDURE drop_course_offering_unique()
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE()
+      AND table_name = 'course_units'
+      AND index_name = 'uniq_course_offering'
+  ) THEN
+    ALTER TABLE course_units DROP INDEX uniq_course_offering;
   END IF;
 END//
 
@@ -260,9 +278,24 @@ CALL add_column_if_missing(
   'VARCHAR(30) NOT NULL DEFAULT ''UNASSIGNED'' AFTER school'
 );
 CALL add_column_if_missing(
+  'students',
+  'academic_level',
+  'ENUM(''Certificate'', ''Diploma'', ''Degree'', ''Masters'', ''PhD'') NOT NULL DEFAULT ''Degree'''
+);
+CALL add_column_if_missing(
   'course_units',
   'degree_program',
   'VARCHAR(30) NOT NULL DEFAULT ''UNASSIGNED'' AFTER school'
+);
+CALL add_column_if_missing(
+  'course_units',
+  'academic_level',
+  'ENUM(''Certificate'', ''Diploma'', ''Degree'', ''Masters'', ''PhD'') NOT NULL DEFAULT ''Degree'''
+);
+CALL add_column_if_missing(
+  'class_schedules',
+  'program',
+  'ENUM(''DAY'', ''WEEKEND'', ''EVENING'', ''DISTANCE'', ''BOTH'') NOT NULL DEFAULT ''BOTH'''
 );
 CALL add_column_if_missing('students', 'profile_picture', 'LONGTEXT NULL');
 CALL add_column_if_missing('students', 'phone_number', 'VARCHAR(20) NULL');
@@ -280,7 +313,7 @@ CALL add_column_if_missing(
 CALL add_column_if_missing(
   'exams',
   'program',
-  'ENUM(''DAY'', ''WEEKEND'', ''BOTH'') NOT NULL DEFAULT ''BOTH'''
+  'ENUM(''DAY'', ''WEEKEND'', ''EVENING'', ''DISTANCE'', ''BOTH'', ''ALL'') NOT NULL DEFAULT ''BOTH'''
 );
 CALL add_column_if_missing(
   'exams',
@@ -299,11 +332,16 @@ CALL add_column_if_missing(
 );
 
 ALTER TABLE course_units MODIFY COLUMN code VARCHAR(40) NOT NULL;
+ALTER TABLE students
+  MODIFY COLUMN program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE') NOT NULL;
+ALTER TABLE exams
+  MODIFY COLUMN program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH', 'ALL') NOT NULL DEFAULT 'BOTH';
 CALL drop_legacy_course_code_unique();
+CALL drop_course_offering_unique();
 CALL add_index_if_missing(
   'course_units',
   'uniq_course_offering',
-  'UNIQUE KEY uniq_course_offering (school, degree_program, year_of_study, semester, code, name)'
+  'UNIQUE KEY uniq_course_offering (school, degree_program, academic_level, year_of_study, semester, code, name)'
 );
 CALL add_index_if_missing(
   'exams',
@@ -319,6 +357,11 @@ CALL add_index_if_missing(
   'course_units',
   'idx_course_units_lecturer_id',
   'KEY idx_course_units_lecturer_id (lecturer_id)'
+);
+CALL add_index_if_missing(
+  'class_schedules',
+  'idx_class_schedules_course_program',
+  'KEY idx_class_schedules_course_program (course_unit_id, program)'
 );
 CALL add_index_if_missing(
   'messages',
@@ -348,6 +391,7 @@ CALL add_constraint_if_missing(
 
 DROP PROCEDURE add_column_if_missing;
 DROP PROCEDURE drop_legacy_course_code_unique;
+DROP PROCEDURE drop_course_offering_unique;
 DROP PROCEDURE add_index_if_missing;
 DROP PROCEDURE add_constraint_if_missing;
 

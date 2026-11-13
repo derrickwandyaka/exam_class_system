@@ -483,9 +483,10 @@ select {
   margin-bottom: 13px;
   padding: 18px 19px;
   border: 1px solid var(--line);
-  border-left: 5px solid var(--accent-yellow);
+  border: 1px solid #f0c94a;
+  border-left: 6px solid var(--danger-red);
   border-radius: 15px;
-  background: var(--white);
+  background: linear-gradient(110deg, #fffdf5 0%, var(--white) 42%);
   box-shadow: 0 6px 18px rgb(30 58 138 / 8%);
   transition: transform 180ms ease, box-shadow 180ms ease;
 }
@@ -516,6 +517,12 @@ select {
   align-items: center;
   gap: 8px 12px;
   margin-bottom: 10px;
+}
+
+.session-date {
+  color: var(--danger-red-dark);
+  font-size: 0.88rem;
+  font-weight: 780;
 }
 
 .session-time {
@@ -567,6 +574,13 @@ select {
   border-color: #d6b600;
   background: var(--accent-yellow-light);
   color: #352e16;
+}
+
+.exam-program-badge {
+  border-color: #d6b600;
+  background: var(--accent-yellow-light);
+  color: #352e16;
+  font-weight: 820;
 }
 
 .general-badge {
@@ -1470,6 +1484,162 @@ select {
 
 .class-info > span {
   overflow-wrap: anywhere;
+}
+
+.today-schedule-card {
+  margin: 20px 0 22px;
+  padding: clamp(18px, 3vw, 25px);
+  border-top: 4px solid var(--accent-yellow);
+}
+
+.today-schedule-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.today-schedule-heading h2 {
+  margin: 3px 0 0;
+  font-size: 1.2rem;
+}
+
+.today-schedule-heading time {
+  padding: 7px 10px;
+  border-radius: 999px;
+  background: var(--primary-blue-light);
+  color: var(--primary-blue);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.eyebrow {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 780;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.today-schedule-list,
+.lecture-timetable {
+  display: grid;
+  gap: 14px;
+}
+
+.today-schedule-item {
+  display: grid;
+  grid-template-columns: minmax(100px, auto) minmax(0, 1fr);
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--primary-blue);
+  border-radius: 12px;
+  background: #fbfdff;
+}
+
+.today-schedule-item.exam {
+  border: 2px solid #e8b916;
+  border-left: 7px solid var(--danger-red);
+  background: linear-gradient(110deg, #fff4f1 0%, #fffbea 100%);
+  box-shadow: 0 7px 20px rgb(220 38 38 / 12%);
+}
+
+.today-schedule-item.lecture {
+  border-left-color: var(--primary-blue);
+}
+
+.today-schedule-item > time {
+  color: var(--primary-blue);
+  font-size: 0.86rem;
+  font-weight: 760;
+}
+
+.today-schedule-item > div {
+  display: grid;
+  gap: 3px;
+}
+
+.today-schedule-item > div > span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.today-schedule-item > div > b,
+.lecture-lecturer {
+  color: var(--primary-blue);
+  font-size: 0.87rem;
+  font-weight: 760;
+}
+
+.today-exam-alert {
+  width: fit-content;
+  padding: 3px 7px;
+  border-radius: 5px;
+  background: var(--danger-red);
+  color: var(--white);
+  font-size: 0.7rem;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+}
+
+.today-schedule-item.exam > div > strong {
+  color: var(--danger-red-dark);
+  font-weight: 850;
+}
+
+.today-schedule-item.exam > time {
+  color: var(--danger-red-dark);
+  font-weight: 850;
+}
+
+.lecture-day-group {
+  display: grid;
+  gap: 9px;
+}
+
+.lecture-day-group h3 {
+  margin: 0;
+  padding: 8px 12px;
+  border-left: 4px solid var(--accent-yellow);
+  border-radius: 0 9px 9px 0;
+  background: var(--primary-blue-light);
+  color: var(--primary-blue);
+  font-size: 0.95rem;
+}
+
+.lecture-card {
+  align-items: center;
+  border-color: #dce5f2;
+  background: linear-gradient(110deg, #fff 0%, #f8fbff 100%);
+  box-shadow: 0 4px 12px rgb(30 58 138 / 5%);
+}
+
+.lecture-time {
+  min-width: 112px;
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: var(--accent-yellow-light);
+  color: var(--primary-blue);
+  font-size: 0.84rem;
+  font-weight: 780;
+  text-align: center;
+}
+
+.lecture-lecturer {
+  display: block;
+}
+
+.admin-lecture-item {
+  align-items: center;
+}
+
+.lecture-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-left: auto;
 }
 
 .notes-card {
@@ -2441,6 +2611,32 @@ select {
     flex-direction: column;
   }
 
+  .today-schedule-heading {
+    flex-direction: column;
+  }
+
+  .today-schedule-item {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .lecture-time {
+    min-width: 0;
+  }
+
+  .admin-lecture-item {
+    align-items: stretch;
+  }
+
+  .lecture-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .lecture-actions .btn {
+    flex: 1;
+  }
+
   .class-day {
     min-width: 0;
   }
@@ -2480,8 +2676,18 @@ select {
   }
 
   .exam-card {
-    gap: 10px;
-    padding: 15px;
+    gap: 8px;
+    padding: 13px;
+  }
+
+  .session-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .session-date {
+    font-size: 0.84rem;
   }
 
   .session-course {

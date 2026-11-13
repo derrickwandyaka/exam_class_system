@@ -210,7 +210,7 @@ async function getBroadcastStudentIds(targetRoom, targetSchool) {
   }
   if (targetRoom !== 'GLOBAL') {
     const room = targetRoom.match(
-      /^(SCI|SBA|SOSS|LAW|Nursing|EDU|Other)-([A-Z0-9][A-Z0-9-]{0,29})-(DAY|WEEKEND)-Y([1-5])-S([12])$/
+      /^(SCI|SBA|SOSS|LAW|Nursing|EDU|Other)-([A-Z0-9][A-Z0-9-]{0,29})-(DAY|WEEKEND|EVENING|DISTANCE)-Y([1-5])-S([12])$/
     );
     if (!room) throw new Error('Invalid group room while selecting push recipients');
     conditions.push('s.school = ?', 's.degree_program = ?', 's.program = ?', 's.year_of_study = ?', 's.semester = ?');
@@ -227,16 +227,18 @@ async function getBroadcastStudentIds(targetRoom, targetSchool) {
 
 async function studentCanAccessCourseUnit(studentId, courseUnitId) {
   const [access] = await pool.query(
-    `SELECT (EXISTS (
-       SELECT 1
-       FROM registrations r
-       WHERE r.student_id = s.id AND r.course_unit_id = cu.id
-    ) AND (cu.school = s.school OR cu.is_public = TRUE))
-    OR cu.is_public = TRUE OR (
-       cu.school = s.school
-       AND (cu.degree_program = s.degree_program OR cu.degree_program = 'ALL')
-       AND cu.year_of_study = s.year_of_study
-       AND cu.semester = s.semester
+    `SELECT cu.academic_level = s.academic_level AND (
+       (EXISTS (
+         SELECT 1
+         FROM registrations r
+         WHERE r.student_id = s.id AND r.course_unit_id = cu.id
+       ) AND (cu.school = s.school OR cu.is_public = TRUE))
+       OR cu.is_public = TRUE OR (
+         cu.school = s.school
+         AND (cu.degree_program = s.degree_program OR cu.degree_program = 'ALL')
+         AND cu.year_of_study = s.year_of_study
+         AND cu.semester = s.semester
+       )
      ) AS can_access
      FROM students s
      JOIN course_units cu ON cu.id = ?
@@ -254,7 +256,7 @@ function getRoomId(student) {
 
 function isValidTargetRoom(targetRoom) {
   return targetRoom === 'GLOBAL' ||
-    /^(SCI|SBA|SOSS|LAW|Nursing|EDU|Other)-[A-Z0-9][A-Z0-9-]{0,29}-(DAY|WEEKEND)-Y[1-5]-S[12]$/.test(targetRoom);
+    /^(SCI|SBA|SOSS|LAW|Nursing|EDU|Other)-[A-Z0-9][A-Z0-9-]{0,29}-(DAY|WEEKEND|EVENING|DISTANCE)-Y[1-5]-S[12]$/.test(targetRoom);
 }
 
 function formatMessages(messages) {
@@ -276,16 +278,18 @@ app.get('/api/push/public-key', (req, res) => {
 });
 
 app.get('/api/registration-programs', asyncRoute(async (req, res) => {
-  const { school } = req.query;
-  if (!isOneOf(school, schoolCodes)) {
-    return res.status(400).json({ error: 'Choose a valid school' });
+  const { school, academicLevel } = req.query;
+  const academicLevels = ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD'];
+  if (!isOneOf(school, schoolCodes) || !isOneOf(academicLevel, academicLevels)) {
+    return res.status(400).json({ error: 'Choose a valid school and academic level' });
   }
   const [programs] = await pool.query(
     `SELECT DISTINCT degree_program AS degreeProgram
      FROM course_units
-     WHERE school = ? AND degree_program NOT IN ('ALL', 'UNASSIGNED')
+     WHERE school = ? AND academic_level = ?
+       AND degree_program NOT IN ('ALL', 'UNASSIGNED')
      ORDER BY degree_program`,
-    [school]
+    [school, academicLevel]
   );
   return res.json(programs.map((program) => program.degreeProgram));
 }));
@@ -350,7 +354,7 @@ app.post('/api/register', asyncRoute(async (req, res) => {
   const {
     firstName, lastName, studentNumber, program, school,
     degreeProgram: submittedDegreeProgram, yearOfStudy, semester, email, password,
-    phoneNumber: submittedPhoneNumber
+    phoneNumber: submittedPhoneNumber, academicLevel
   } = req.body;
   const degreeProgram = normalizeDegreeProgram(submittedDegreeProgram);
   const phoneNumber = typeof submittedPhoneNumber === 'string' ? submittedPhoneNumber.trim() : '';
@@ -365,19 +369,20 @@ app.post('/api/register', asyncRoute(async (req, res) => {
       phoneDigits.length < 7 || phoneDigits.length > 15) {
     return res.status(400).json({ error: 'Enter a valid phone number, including country code' });
   }
-  if (!isOneOf(program, ['DAY', 'WEEKEND']) ||
+  if (!isOneOf(academicLevel, ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD']) ||
+      !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE']) ||
       !isOneOf(school, schoolCodes) ||
       !Number.isInteger(Number(yearOfStudy)) || Number(yearOfStudy) < 1 || Number(yearOfStudy) > 5 ||
       !Number.isInteger(Number(semester)) || ![1, 2].includes(Number(semester)) ||
       !degreeProgram || password.length < 6) {
-    return res.status(400).json({ error: 'Check the degree program, study program, school, year, semester, and password' });
+    return res.status(400).json({ error: 'Check the academic level, degree program, study program, school, year, semester, and password' });
   }
 
   const [matchingPrograms] = await pool.query(
     `SELECT 1 FROM course_units
-     WHERE school = ? AND degree_program = ?
+     WHERE school = ? AND degree_program = ? AND academic_level = ?
      LIMIT 1`,
-    [school, degreeProgram]
+    [school, degreeProgram, academicLevel]
   );
   if (!matchingPrograms.length) {
     return res.status(400).json({ error: 'Select a degree program offered by the selected school' });
@@ -392,11 +397,11 @@ app.post('/api/register', asyncRoute(async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const [result] = await pool.query(
       `INSERT INTO students
-        (first_name, last_name, student_number, program, school, phone_number, degree_program,
+        (first_name, last_name, student_number, academic_level, program, school, phone_number, degree_program,
          year_of_study, semester, email, password_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        firstName.trim(), lastName.trim(), studentNumber.trim(), program, school, phoneNumber,
+        firstName.trim(), lastName.trim(), studentNumber.trim(), academicLevel, program, school, phoneNumber,
         degreeProgram, Number(yearOfStudy), Number(semester), normalizedEmail, passwordHash
       ]
     );
@@ -518,7 +523,7 @@ app.post('/api/admin/login', asyncRoute(async (req, res) => {
 app.get('/api/me', auth('student'), asyncRoute(async (req, res) => {
   const [students] = await pool.query(
     `SELECT id, first_name AS firstName, last_name AS lastName, student_number AS studentNumber,
-            program, school, degree_program AS degreeProgram,
+            academic_level AS academicLevel, program, school, degree_program AS degreeProgram,
             year_of_study AS yearOfStudy, semester, email,
             profile_picture AS profilePicture
      FROM students WHERE id = ?`,
@@ -595,6 +600,7 @@ app.get('/api/course-units', auth('student'), asyncRoute(async (req, res) => {
   const searchPattern = `%${search}%`;
   const [units] = await pool.query(
     `SELECT cu.id, cu.code, cu.name, cu.school, cu.degree_program AS degreeProgram,
+            cu.academic_level AS academicLevel,
             cu.year_of_study AS yearOfStudy, cu.semester, cu.is_public AS isPublic,
             CASE WHEN r.id IS NULL THEN 0 ELSE 1 END AS registered,
             l.name AS lecturerName
@@ -603,7 +609,8 @@ app.get('/api/course-units', auth('student'), asyncRoute(async (req, res) => {
      JOIN students s ON s.id = ?
      LEFT JOIN registrations r
        ON r.course_unit_id = cu.id AND r.student_id = s.id
-     WHERE (cu.school = s.school OR cu.is_public = TRUE)
+     WHERE cu.academic_level = s.academic_level
+       AND (cu.school = s.school OR cu.is_public = TRUE)
        ${searchFilter}
      ORDER BY cu.code, cu.year_of_study, cu.semester`,
     search ? [req.user.id, searchPattern, searchPattern] : [req.user.id]
@@ -623,20 +630,19 @@ app.get('/api/classes', auth('student'), asyncRoute(async (req, res) => {
   const searchPattern = `%${search}%`;
   const [classes] = await pool.query(
     `SELECT cs.id, cu.id AS courseUnitId, cu.code, cu.name AS courseName,
+            cu.academic_level AS academicLevel,
             cs.day_of_week AS dayOfWeek, cs.start_time AS startTime,
-            cs.end_time AS endTime, cs.room, l.name AS lecturerName
+            cs.end_time AS endTime, cs.room, cs.program,
+            l.name AS lecturerName
      FROM students s
-     JOIN course_units cu
-       ON cu.is_public = TRUE OR (
-         cu.school = s.school
-         AND (cu.degree_program = s.degree_program OR cu.degree_program = 'ALL')
-         AND cu.year_of_study = s.year_of_study
-         AND cu.semester = s.semester
-       )
-     LEFT JOIN class_schedules cs ON cs.course_unit_id = cu.id
+     JOIN registrations r ON r.student_id = s.id
+     JOIN course_units cu ON cu.id = r.course_unit_id
+       AND cu.academic_level = s.academic_level
+     LEFT JOIN class_schedules cs
+       ON cs.course_unit_id = cu.id
+       AND (cs.program = 'BOTH' OR cs.program = s.program)
      LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
      WHERE s.id = ?
-       AND COALESCE(cs.lecturer_id, cu.lecturer_id) IS NOT NULL
        ${searchFilter}
      ORDER BY (cs.id IS NULL), FIELD(cs.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
                     'Friday', 'Saturday', 'Sunday'), cs.start_time, cu.code`,
@@ -659,7 +665,8 @@ app.post('/api/registrations', auth('student'), asyncRoute(async (req, res) => {
        SELECT s.id, cu.id
        FROM students s
        JOIN course_units cu
-         ON (cu.school = s.school OR cu.is_public = TRUE)
+         ON cu.academic_level = s.academic_level
+         AND (cu.school = s.school OR cu.is_public = TRUE)
        WHERE s.id = ? AND cu.id = ?`,
       [req.user.id, courseUnitId]
     );
@@ -728,7 +735,8 @@ app.get('/api/exams', auth('student'), asyncRoute(async (req, res) => {
      JOIN registrations r ON r.course_unit_id = cu.id
      JOIN students s ON s.id = r.student_id
      WHERE s.id = ?
-       AND (e.program = 'BOTH' OR e.program = s.program)
+       AND cu.academic_level = s.academic_level
+       AND (e.program IN ('BOTH', 'ALL') OR e.program = s.program)
        ${searchFilter}
      ORDER BY e.exam_date, e.start_time`,
     search
@@ -1260,6 +1268,7 @@ app.get('/api/admin/classes', authSchoolAdmin, asyncRoute(async (req, res) => {
   const scopeFilter = adminSchoolFilter(req, 'cu.school');
   const [classes] = await pool.query(
     `SELECT cs.id, cs.course_unit_id AS courseUnitId, cu.code, cu.name AS courseName,
+            COALESCE(cs.lecturer_id, cu.lecturer_id) AS lecturerId, cs.program,
             cs.day_of_week AS dayOfWeek, cs.start_time AS startTime,
             cs.end_time AS endTime, cs.room, l.name AS lecturerName
      FROM class_schedules cs
@@ -1275,26 +1284,104 @@ app.get('/api/admin/classes', authSchoolAdmin, asyncRoute(async (req, res) => {
 
 app.post('/api/admin/classes', authSchoolAdmin, asyncRoute(async (req, res) => {
   const courseUnitId = Number(req.body.courseUnitId);
-  const { dayOfWeek, startTime, endTime, room } = req.body;
+  const lecturerId = Number(req.body.lecturerId);
+  const { dayOfWeek, startTime, endTime, room, program = 'BOTH' } = req.body;
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   if (!Number.isInteger(courseUnitId) || courseUnitId < 1 ||
+      !Number.isInteger(lecturerId) || lecturerId < 1 ||
       !isOneOf(dayOfWeek, days) ||
       typeof startTime !== 'string' || !/^\d{2}:\d{2}$/.test(startTime) ||
       typeof endTime !== 'string' || !/^\d{2}:\d{2}$/.test(endTime) ||
-      startTime >= endTime || typeof room !== 'string' || !room.trim() || room.trim().length > 50) {
-    return res.status(400).json({ error: 'Enter a valid course, day, time range, and room' });
+      startTime >= endTime || typeof room !== 'string' || !room.trim() || room.trim().length > 50 ||
+      !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH'])) {
+    return res.status(400).json({ error: 'Enter a valid course, lecturer, day, time range, room, and program' });
+  }
+  const schoolScope = isSuperAdmin(req) ? '' : ' AND cu.school = ?';
+  const [matchingCourse] = await pool.query(
+    `SELECT cu.id FROM course_units cu
+     JOIN lecturers l ON l.id = ? AND l.school = cu.school
+     WHERE cu.id = ?${schoolScope}`,
+    [lecturerId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+  );
+  if (!matchingCourse.length) {
+    return res.status(400).json({ error: 'Choose a lecturer from the course unit’s school' });
   }
   const [result] = await pool.query(
-    `INSERT INTO class_schedules (course_unit_id, lecturer_id, day_of_week, start_time, end_time, room)
-     SELECT id, lecturer_id, ?, ?, ?, ? FROM course_units
-     WHERE id = ?${isSuperAdmin(req) ? '' : ' AND school = ?'}`,
+    `INSERT INTO class_schedules
+       (course_unit_id, lecturer_id, day_of_week, start_time, end_time, room, program)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
-      dayOfWeek, `${startTime}:00`, `${endTime}:00`, room.trim(), courseUnitId,
-      ...(!isSuperAdmin(req) ? [req.user.school] : [])
+      courseUnitId, lecturerId, dayOfWeek, `${startTime}:00`, `${endTime}:00`, room.trim(), program
     ]
   );
-  if (!result.affectedRows) return res.status(404).json({ error: 'Course unit not found' });
   return res.status(201).json({ id: result.insertId });
+}));
+
+app.put('/api/admin/classes/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.params.id);
+  const courseUnitId = Number(req.body.courseUnitId);
+  const lecturerId = Number(req.body.lecturerId);
+  const { dayOfWeek, startTime, endTime, room, program } = req.body;
+  const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+  if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
+      !Number.isInteger(courseUnitId) || courseUnitId < 1 ||
+      !Number.isInteger(lecturerId) || lecturerId < 1 ||
+      !isOneOf(dayOfWeek, days) ||
+      typeof startTime !== 'string' || !/^\d{2}:\d{2}$/.test(startTime) ||
+      typeof endTime !== 'string' || !/^\d{2}:\d{2}$/.test(endTime) ||
+      startTime >= endTime || typeof room !== 'string' || !room.trim() || room.trim().length > 50 ||
+      !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH'])) {
+    return res.status(400).json({ error: 'Enter a valid course, lecturer, day, time range, room, and program' });
+  }
+
+  const scopeFilter = adminSchoolFilter(req, 'cu.school');
+  const [matchingCourse] = await pool.query(
+    `SELECT cu.id FROM course_units cu
+     JOIN lecturers l ON l.id = ? AND l.school = cu.school
+     WHERE cu.id = ?${scopeFilter.sql}`,
+    [lecturerId, courseUnitId, ...scopeFilter.params]
+  );
+  if (!matchingCourse.length) {
+    return res.status(400).json({ error: 'Choose a lecturer from the course unit’s school' });
+  }
+
+  const [result] = await pool.query(
+    `UPDATE class_schedules cs
+     JOIN course_units cu ON cu.id = cs.course_unit_id
+     SET cs.course_unit_id = ?, cs.lecturer_id = ?, cs.day_of_week = ?,
+         cs.start_time = ?, cs.end_time = ?, cs.room = ?, cs.program = ?
+     WHERE cs.id = ?${scopeFilter.sql}`,
+    [
+      courseUnitId, lecturerId, dayOfWeek, `${startTime}:00`, `${endTime}:00`,
+      room.trim(), program, scheduleId, ...scopeFilter.params
+    ]
+  );
+  if (!result.affectedRows) {
+    const [existing] = await pool.query(
+      `SELECT cs.id FROM class_schedules cs
+       JOIN course_units cu ON cu.id = cs.course_unit_id
+       WHERE cs.id = ?${scopeFilter.sql}`,
+      [scheduleId, ...scopeFilter.params]
+    );
+    if (!existing.length) return res.status(404).json({ error: 'Class schedule not found' });
+  }
+  return res.json({ ok: true });
+}));
+
+app.delete('/api/admin/classes/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.params.id);
+  if (!Number.isInteger(scheduleId) || scheduleId < 1) {
+    return res.status(400).json({ error: 'A valid class schedule is required' });
+  }
+  const scopeFilter = adminSchoolFilter(req, 'cu.school');
+  const [result] = await pool.query(
+    `DELETE cs FROM class_schedules cs
+     JOIN course_units cu ON cu.id = cs.course_unit_id
+     WHERE cs.id = ?${scopeFilter.sql}`,
+    [scheduleId, ...scopeFilter.params]
+  );
+  if (!result.affectedRows) return res.status(404).json({ error: 'Class schedule not found' });
+  return res.json({ ok: true });
 }));
 
 app.post('/api/admin/broadcast', authSchoolAdmin, asyncRoute(async (req, res) => {
@@ -1412,6 +1499,7 @@ app.get('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res) 
   const searchPattern = `%${search}%`;
   const [units] = await pool.query(
     `SELECT id, code, name, school, degree_program AS degreeProgram,
+            academic_level AS academicLevel,
             year_of_study AS yearOfStudy, semester, lecturer_id AS lecturerId, is_public AS isPublic
      FROM course_units ${searchFilter} ORDER BY code`,
     [...(search ? [searchPattern, searchPattern] : []), ...scopeFilter.params]
@@ -1433,7 +1521,7 @@ app.get('/api/admin/students', authSchoolAdmin, asyncRoute(async (req, res) => {
   const [students] = await pool.query(
     `SELECT s.id, s.first_name AS firstName, s.last_name AS lastName,
             s.student_number AS studentNumber, s.email, s.school,
-            s.degree_program AS degreeProgram, s.program,
+            s.degree_program AS degreeProgram, s.academic_level AS academicLevel, s.program,
             s.year_of_study AS yearOfStudy, s.semester, s.created_at AS createdAt
      FROM students s
      ${searchFilter}
@@ -1453,6 +1541,7 @@ app.post('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res)
   const { code, name } = req.body;
   const school = isSuperAdmin(req) ? req.body.school : req.user.school;
   const isPublic = req.body.isPublic === undefined ? false : req.body.isPublic;
+  const academicLevel = req.body.academicLevel;
   const degreeProgram = normalizeDegreeProgram(req.body.degreeProgram);
   const yearOfStudy = Number(req.body.yearOfStudy);
   const semester = Number(req.body.semester);
@@ -1461,12 +1550,13 @@ app.post('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res)
   if (typeof code !== 'string' || !code.trim() ||
       typeof name !== 'string' || !name.trim() ||
       !degreeProgram ||
+      !isOneOf(academicLevel, ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD']) ||
       !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other']) ||
       typeof isPublic !== 'boolean' ||
       !Number.isInteger(yearOfStudy) || yearOfStudy < 1 || yearOfStudy > 5 ||
       !Number.isInteger(semester) || ![1, 2].includes(semester) ||
       (lecturerId !== null && (!Number.isInteger(lecturerId) || lecturerId < 1))) {
-    return res.status(400).json({ error: 'Enter a valid code, name, degree program, school, year, and semester' });
+    return res.status(400).json({ error: 'Enter a valid code, name, academic level, degree program, school, year, and semester' });
   }
   if (lecturerId !== null) {
     const [lecturers] = await pool.query(
@@ -1478,9 +1568,9 @@ app.post('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res)
   try {
     const [result] = await pool.query(
       `INSERT INTO course_units
-         (code, name, school, degree_program, year_of_study, semester, lecturer_id, is_public)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [code.trim(), name.trim(), school, degreeProgram, yearOfStudy, semester, lecturerId, isPublic]
+         (code, name, school, degree_program, academic_level, year_of_study, semester, lecturer_id, is_public)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [code.trim(), name.trim(), school, degreeProgram, academicLevel, yearOfStudy, semester, lecturerId, isPublic]
     );
     return res.status(201).json({ id: result.insertId });
   } catch (error) {
@@ -1578,7 +1668,7 @@ app.post('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
       typeof endTime !== 'string' || !/^\d{2}:\d{2}$/.test(endTime) ||
       startTime >= endTime ||
       typeof room !== 'string' || !room.trim() ||
-      !isOneOf(program, ['DAY', 'WEEKEND', 'BOTH'])) {
+      !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH', 'ALL'])) {
     return res.status(400).json({ error: 'Select valid course units and enter a valid date, time range, room, and program' });
   }
 
