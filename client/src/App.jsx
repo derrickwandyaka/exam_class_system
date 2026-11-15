@@ -135,6 +135,25 @@ function SearchBar({ value, onChange, placeholder, label = 'Search' }) {
   );
 }
 
+function Modal({ title, onClose, children, className = '' }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className={`modal feature-modal ${className}`} role="dialog" aria-modal="true"
+        aria-label={title}>
+        <button type="button" className="modal-close-button" aria-label="Close dialog"
+          onClick={onClose}>×</button>
+        {children}
+      </section>
+    </div>
+  );
+}
+
+function StatusBadge({ status }) {
+  return <span className={`status-badge status-${status.toLowerCase()}`}>{status}</span>;
+}
+
 function noSearchResults(search) {
   return <p className="search-empty muted">No results found for ‘{search}’. Try adjusting your search.</p>;
 }
@@ -302,6 +321,7 @@ export default function App() {
 
   if (role === 'SUPER_ADMIN') return <SuperAdminApp onLogout={logout} />;
   if (role === 'SCHOOL_ADMIN') return <AdminApp onLogout={logout} />;
+  if (role === 'EXAM_OFFICER') return <ExamOfficerApp onLogout={logout} />;
   if (role === 'COORDINATOR') return <CoordinatorApp onLogout={logout} />;
   if (role === 'student') return <StudentApp onLogout={logout} />;
   if (role === 'lecturer') return <LecturerApp onLogout={logout} />;
@@ -364,7 +384,7 @@ function AuthScreen({ onAuth }) {
         body: JSON.stringify(body)
       });
       const authenticatedRole = sessionRole || result.role;
-      if (!result.token || !['SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'student', 'lecturer'].includes(authenticatedRole)) {
+      if (!result.token || !['SUPER_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR', 'student', 'lecturer'].includes(authenticatedRole)) {
         throw new Error('Sign-in response was invalid. Please try again.');
       }
       setSession(result.token, authenticatedRole);
@@ -1367,7 +1387,7 @@ function StudentApp({ onLogout }) {
   );
 }
 
-function ExamSessionCard({ session, onDelete, busyExamId, onComplete, busyRegistrationId }) {
+function ExamSessionCard({ session, onDelete, onEdit, busyExamId, onComplete, busyRegistrationId }) {
   const sessionCompleted = session.courses.every((course) => course.isCompleted);
   return (
     <article className={`exam-card${sessionCompleted ? ' completed' : ''}`}>
@@ -1413,10 +1433,17 @@ function ExamSessionCard({ session, onDelete, busyExamId, onComplete, busyRegist
                 </details>
               )}
               {onDelete && (
-                <button type="button" className="btn delete-btn small" onClick={() => onDelete(course.id)}
-                  disabled={busyExamId === course.id}>
-                  {busyExamId === course.id ? <><span className="spinner" /> Deleting…</> : 'Delete'}
-                </button>
+                <div className="exam-admin-actions">
+                  {onEdit && (
+                    <button type="button" className="btn ghost small" onClick={() => onEdit(course)}>
+                      Edit
+                    </button>
+                  )}
+                  <button type="button" className="btn delete-btn small" onClick={() => onDelete(course.id)}
+                    disabled={busyExamId === course.id}>
+                    {busyExamId === course.id ? <><span className="spinner" /> Deleting…</> : 'Delete'}
+                  </button>
+                </div>
               )}
             </li>
           ))}
@@ -1429,6 +1456,7 @@ function ExamSessionCard({ session, onDelete, busyExamId, onComplete, busyRegist
 function LecturerApp({ onLogout }) {
   const [lecturer, setLecturer] = useState(null);
   const [courses, setCourses] = useState([]);
+  const [invigilations, setInvigilations] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [courseSearch, setCourseSearch] = useState('');
   const debouncedCourseSearch = useDebouncedValue(courseSearch);
@@ -1439,6 +1467,12 @@ function LecturerApp({ onLogout }) {
   const [notesRefresh, setNotesRefresh] = useState(0);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [reportExam, setReportExam] = useState(null);
+  const [reportStudents, setReportStudents] = useState([]);
+  const [reportStudentId, setReportStudentId] = useState('');
+  const [reportDescription, setReportDescription] = useState('');
+  const [reportBusy, setReportBusy] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
   const notify = useToast();
 
   async function loadCourses() {
@@ -1450,6 +1484,7 @@ function LecturerApp({ onLogout }) {
       ]);
       setLecturer(profile);
       setCourses(assignedCourses);
+      setInvigilations(await api('/lecturer/invigilations'));
       setSelectedCourseId((current) =>
         assignedCourses.some((course) => String(course.id) === current)
           ? current
@@ -1512,6 +1547,47 @@ function LecturerApp({ onLogout }) {
 
   const selectedCourse = courses.find((course) => String(course.id) === selectedCourseId);
 
+  async function beginMalpracticeReport(exam) {
+    setReportExam(exam);
+    setReportStudents([]);
+    setReportStudentId('');
+    setReportDescription('');
+    setReportLoading(true);
+    try {
+      const studentsForExam = await api(`/lecturer/invigilations/${exam.id}/students`);
+      setReportStudents(studentsForExam);
+      if (!studentsForExam.length) notify('No eligible registered students were found for this exam.', 'error');
+    } catch (requestError) {
+      setReportExam(null);
+      notify(requestError.message || 'Could not load registered students.', 'error');
+    } finally {
+      setReportLoading(false);
+    }
+  }
+
+  async function submitMalpracticeReport(event) {
+    event.preventDefault();
+    if (!reportExam || reportBusy) return;
+    setReportBusy(true);
+    try {
+      await api('/lecturer/report-malpractice', {
+        method: 'POST',
+        body: JSON.stringify({
+          exam_id: reportExam.id,
+          student_id: Number(reportStudentId),
+          description: reportDescription
+        })
+      });
+      notify('Malpractice report submitted to the Examination Office.');
+      setReportExam(null);
+      setReportStudents([]);
+    } catch (requestError) {
+      notify(requestError.message || 'Could not submit the report.', 'error');
+    } finally {
+      setReportBusy(false);
+    }
+  }
+
   async function dismissReminder(reminderId) {
     try {
       await api(`/lecturer/notifications/${reminderId}/read`, { method: 'POST' });
@@ -1554,6 +1630,19 @@ function LecturerApp({ onLogout }) {
         <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
       </header>
 
+      <div className="tabs lecturer-tabs" role="tablist" aria-label="Lecturer dashboard">
+        {courses.length > 0 && (
+          <>
+            <button type="button" className={activeView === 'notes' ? 'tab active' : 'tab'}
+              onClick={() => setActiveView('notes')}>Upload Notes</button>
+            <button type="button" className={activeView === 'chat' ? 'tab active' : 'tab'}
+              onClick={() => setActiveView('chat')}>Class Chat</button>
+          </>
+        )}
+        <button type="button" className={activeView === 'invigilations' ? 'tab active' : 'tab'}
+          onClick={() => setActiveView('invigilations')}>My Invigilations</button>
+      </div>
+
       {reminders.length > 0 && (
         <section className="card lecturer-reminders" aria-label="Lecture reminders">
           <h2>Lecture reminders</h2>
@@ -1573,6 +1662,33 @@ function LecturerApp({ onLogout }) {
 
       {loading ? (
         <div className="loading-state"><span className="spinner" /> Loading your courses…</div>
+      ) : activeView === 'invigilations' ? (
+        <section className="invigilation-list" aria-label="My invigilations">
+          {!invigilations.length ? (
+            <section className="empty">
+              <h2>No invigilations assigned</h2>
+              <p className="muted">Exams assigned to you by the Examination Office will appear here.</p>
+            </section>
+          ) : invigilations.map((exam) => (
+            <article className="card invigilation-card" key={exam.id}>
+              <div className="invigilation-heading">
+                <div>
+                  <p className="eyebrow">{exam.code} · {exam.degreeProgram}</p>
+                  <h2>{exam.courseName}</h2>
+                  <p className="muted">{formatDate(exam.examDate)} · {formatTime(exam.startTime)}–{formatTime(exam.endTime)}</p>
+                  <p className="muted">Room: {exam.room} · Program: {exam.program}</p>
+                </div>
+                <StatusBadge status={exam.status} />
+              </div>
+              {exam.canReport && (
+                <button type="button" className="btn report-malpractice-btn"
+                  onClick={() => beginMalpracticeReport(exam)}>
+                  Report Malpractice
+                </button>
+              )}
+            </article>
+          ))}
+        </section>
       ) : !courses.length ? (
         <section className="empty">
           <h2>No assigned courses yet</h2>
@@ -1608,12 +1724,6 @@ function LecturerApp({ onLogout }) {
                   <p className="muted">{selectedCourse.name}</p>
                 </div>
               </header>
-              <div className="tabs lecturer-tabs" role="tablist" aria-label="Course tools">
-                <button type="button" className={activeView === 'notes' ? 'tab active' : 'tab'}
-                  onClick={() => setActiveView('notes')}>Upload Notes</button>
-                <button type="button" className={activeView === 'chat' ? 'tab active' : 'tab'}
-                  onClick={() => setActiveView('chat')}>Class Chat</button>
-              </div>
               {activeView === 'notes' ? (
                 <div className="lecturer-notes-view">
                   <section className="card">
@@ -1660,6 +1770,236 @@ function LecturerApp({ onLogout }) {
             </section>
           )}
         </div>
+      )}
+      {reportExam && (
+        <Modal title="Report malpractice" onClose={() => {
+          if (!reportBusy) setReportExam(null);
+        }} className="report-modal">
+          <h2>Report malpractice</h2>
+          <p className="muted small">{reportExam.code} — {reportExam.courseName}</p>
+          {reportLoading ? (
+            <div className="loading-state"><span className="spinner" /> Loading registered students…</div>
+          ) : (
+            <form className="form" onSubmit={submitMalpracticeReport}>
+              <label>Student
+                <select required value={reportStudentId}
+                  onChange={(event) => setReportStudentId(event.target.value)}>
+                  <option value="">Select a registered student</option>
+                  {reportStudents.map((student) => (
+                    <option key={student.id} value={student.id}>
+                      {student.firstName} {student.lastName} · {student.studentNumber}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>Description of offense
+                <textarea required minLength={1} maxLength={5000} rows={5}
+                  value={reportDescription}
+                  onChange={(event) => setReportDescription(event.target.value)}
+                  placeholder="Describe what happened and when." />
+              </label>
+              <div className="modal-actions">
+                <button type="button" className="btn ghost"
+                  onClick={() => setReportExam(null)} disabled={reportBusy}>Cancel</button>
+                <button type="submit" className="btn danger-btn"
+                  disabled={reportBusy || !reportStudents.length || !reportStudentId}>
+                  {reportBusy ? 'Submitting…' : 'Submit report'}
+                </button>
+              </div>
+            </form>
+          )}
+        </Modal>
+      )}
+    </main>
+  );
+}
+
+function ExamOfficerApp({ onLogout }) {
+  const [exams, setExams] = useState([]);
+  const [lecturers, setLecturers] = useState([]);
+  const [cases, setCases] = useState([]);
+  const [tab, setTab] = useState('exams');
+  const [loading, setLoading] = useState(true);
+  const [assignmentExam, setAssignmentExam] = useState(null);
+  const [assignmentForm, setAssignmentForm] = useState({ room: '', invigilatorId: '' });
+  const [busy, setBusy] = useState('');
+  const notify = useToast();
+
+  async function load() {
+    setLoading(true);
+    try {
+      const [examResults, lecturerResults, caseResults] = await Promise.all([
+        api('/examofficer/exams'),
+        api('/examofficer/lecturers'),
+        api('/examofficer/cases')
+      ]);
+      setExams(examResults);
+      setLecturers(lecturerResults);
+      setCases(caseResults);
+    } catch (error) {
+      if (error.message === 'Invalid session' || error.message === 'Not logged in') {
+        onLogout();
+      } else {
+        notify(error.message || 'Could not load Examination Office data.', 'error');
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  function beginAssignment(exam) {
+    setAssignmentExam(exam);
+    setAssignmentForm({
+      room: exam.room || '',
+      invigilatorId: exam.invigilatorId ? String(exam.invigilatorId) : ''
+    });
+  }
+
+  async function assignExam(event) {
+    event.preventDefault();
+    if (!assignmentExam) return;
+    setBusy(`exam-${assignmentExam.id}`);
+    try {
+      await api(`/examofficer/exams/${assignmentExam.id}/assign`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          room: assignmentForm.room,
+          invigilatorId: Number(assignmentForm.invigilatorId)
+        })
+      });
+      setAssignmentExam(null);
+      notify('Room and invigilator assigned.');
+      await load();
+    } catch (error) {
+      notify(error.message || 'Could not assign this exam.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function updateCase(caseItem, status) {
+    setBusy(`case-${caseItem.id}`);
+    try {
+      await api(`/examofficer/cases/${caseItem.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status })
+      });
+      setCases((current) => current.map((item) =>
+        item.id === caseItem.id ? { ...item, status } : item
+      ));
+      notify(`Case ${status.toLowerCase()}.`);
+    } catch (error) {
+      notify(error.message || 'Could not update the malpractice case.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  return (
+    <main className="page exam-officer-page">
+      <header className="topbar">
+        <div>
+          <div className="hello">Examination Office</div>
+          <div className="muted small">Manage exam rooms, invigilators, and malpractice reports</div>
+        </div>
+        <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
+      </header>
+      <div className="tabs" role="tablist" aria-label="Examination Office sections">
+        <button type="button" className={tab === 'exams' ? 'tab active' : 'tab'}
+          onClick={() => setTab('exams')}>Manage Exams ({exams.length})</button>
+        <button type="button" className={tab === 'cases' ? 'tab active' : 'tab'}
+          onClick={() => setTab('cases')}>Malpractice Cases ({cases.length})</button>
+      </div>
+      {loading && <div className="inline-loading"><span className="spinner" /> Loading Examination Office data…</div>}
+
+      {tab === 'exams' && (
+        <section className="exam-officer-list">
+          {!exams.length && !loading && <section className="empty"><p>No exams are available to manage.</p></section>}
+          {exams.map((exam) => (
+            <article className="card officer-exam-card" key={exam.id}>
+              <div>
+                <p className="eyebrow">{exam.school} · {exam.code} · {exam.degreeProgram}</p>
+                <h2>{exam.courseName}</h2>
+                <p className="muted">{formatDate(exam.examDate)} · {formatTime(exam.startTime)}–{formatTime(exam.endTime)}</p>
+                <p className="muted">Room: {exam.room} · Program: {exam.program}</p>
+                <p className="muted">Invigilator: {exam.invigilatorName || 'Not assigned'}</p>
+              </div>
+              <div className="officer-exam-actions">
+                <StatusBadge status={exam.status} />
+                <button type="button" className="btn primary"
+                  onClick={() => beginAssignment(exam)}>Assign Room &amp; Invigilator</button>
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+
+      {tab === 'cases' && (
+        <section className="malpractice-case-list">
+          {!cases.length && !loading && <section className="empty"><p>No malpractice reports have been submitted.</p></section>}
+          {cases.map((caseItem) => (
+            <article className="card malpractice-case-card" key={caseItem.id}>
+              <div className="case-heading">
+                <div>
+                  <p className="eyebrow">{caseItem.code} · {caseItem.courseName}</p>
+                  <h2>{caseItem.studentName} <span className="muted small">({caseItem.studentNumber})</span></h2>
+                  <p className="muted">Exam: {formatDate(caseItem.examDate)} · {formatTime(caseItem.startTime)}</p>
+                  <p className="muted">Accuser: {caseItem.lecturerName} · {new Date(caseItem.createdAt).toLocaleString()}</p>
+                </div>
+                <StatusBadge status={caseItem.status} />
+              </div>
+              <p className="case-description">{caseItem.description}</p>
+              {caseItem.status === 'PENDING' && (
+                <div className="case-actions">
+                  <button type="button" className="btn resolve-case-btn"
+                    onClick={() => updateCase(caseItem, 'RESOLVED')}
+                    disabled={busy === `case-${caseItem.id}`}>
+                    {busy === `case-${caseItem.id}` ? 'Updating…' : 'Resolve'}
+                  </button>
+                  <button type="button" className="btn dismiss-case-btn"
+                    onClick={() => updateCase(caseItem, 'DISMISSED')}
+                    disabled={busy === `case-${caseItem.id}`}>Dismiss</button>
+                </div>
+              )}
+            </article>
+          ))}
+        </section>
+      )}
+
+      {assignmentExam && (
+        <Modal title="Assign room and invigilator" onClose={() => {
+          if (busy !== `exam-${assignmentExam.id}`) setAssignmentExam(null);
+        }} className="exam-edit-modal">
+          <h2>Assign Room &amp; Invigilator</h2>
+          <p className="muted small">{assignmentExam.code} — {assignmentExam.courseName}</p>
+          <form className="form" onSubmit={assignExam}>
+            <label>Room
+              <input required maxLength={50} value={assignmentForm.room}
+                onChange={(event) => setAssignmentForm({ ...assignmentForm, room: event.target.value })} />
+            </label>
+            <label>Invigilator
+              <select required value={assignmentForm.invigilatorId}
+                onChange={(event) => setAssignmentForm({ ...assignmentForm, invigilatorId: event.target.value })}>
+                <option value="">Select a lecturer</option>
+                {lecturers.map((lecturer) => (
+                  <option key={lecturer.id} value={lecturer.id}>{lecturer.name} · {lecturer.email}</option>
+                ))}
+              </select>
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setAssignmentExam(null)}
+                disabled={busy === `exam-${assignmentExam.id}`}>Cancel</button>
+              <button type="submit" className="btn primary"
+                disabled={busy === `exam-${assignmentExam.id}` || !assignmentForm.invigilatorId}>
+                {busy === `exam-${assignmentExam.id}` ? 'Saving…' : 'Assign exam'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
     </main>
   );
@@ -2041,6 +2381,10 @@ function AdminApp({ onLogout, superAdmin = false }) {
   const [busyAction, setBusyAction] = useState('');
   const [editingClassId, setEditingClassId] = useState(null);
   const [busyExamId, setBusyExamId] = useState(null);
+  const [editingExam, setEditingExam] = useState(null);
+  const [examEditForm, setExamEditForm] = useState({
+    examDate: '', startTime: '', endTime: '', room: '', program: 'BOTH'
+  });
   const [broadcastType, setBroadcastType] = useState('global');
   const [broadcastSchool, setBroadcastSchool] = useState('SCI');
   const [broadcastTargetSchool, setBroadcastTargetSchool] = useState('ALL');
@@ -2254,7 +2598,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
       }
       notify(adminForm.role === 'COORDINATOR'
         ? 'Lecture Coordinator account created.'
-        : 'School admin account created.');
+        : adminForm.role === 'EXAM_OFFICER'
+          ? 'Examination Office account created.'
+          : 'School admin account created.');
     } catch (requestError) {
       notify(requestError.message || 'Could not create the account.', 'error');
     } finally {
@@ -2413,6 +2759,36 @@ function AdminApp({ onLogout, superAdmin = false }) {
     }
   }
 
+  function startExamEdit(exam) {
+    setEditingExam(exam);
+    setExamEditForm({
+      examDate: exam.examDate,
+      startTime: formatTime(exam.startTime),
+      endTime: formatTime(exam.endTime),
+      room: exam.room,
+      program: exam.program || 'BOTH'
+    });
+  }
+
+  async function saveExamEdit(event) {
+    event.preventDefault();
+    if (!editingExam) return;
+    setBusyExamId(editingExam.id);
+    try {
+      await api(`/admin/exams/${editingExam.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(examEditForm)
+      });
+      setEditingExam(null);
+      notify('Exam updated.');
+      await load();
+    } catch (requestError) {
+      notify(requestError.message || 'Could not update the exam.', 'error');
+    } finally {
+      setBusyExamId(null);
+    }
+  }
+
   async function sendBroadcast(event) {
     event.preventDefault();
     const text = broadcastText.trim();
@@ -2470,8 +2846,8 @@ function AdminApp({ onLogout, superAdmin = false }) {
       {tab === 'admins' && isSuperAdminUser && (
         <div className="lecturer-management">
           <section className="card">
-            <h2>Create school admin or coordinator</h2>
-            <p className="muted small">Create a Lecture Coordinator account, then assign it to one or more course units in Manage.</p>
+            <h2>Create an administrator account</h2>
+            <p className="muted small">Create school admins, Lecture Coordinators, or Examination Office accounts.</p>
             <form className="form" onSubmit={addSchoolAdmin}>
               <label>Email
                 <input required type="email" autoComplete="email" maxLength={100}
@@ -2494,6 +2870,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
                   onChange={(event) => setAdminForm({ ...adminForm, role: event.target.value })}>
                   <option value="SCHOOL_ADMIN">School admin</option>
                   <option value="COORDINATOR">Lecture Coordinator</option>
+                  <option value="EXAM_OFFICER">Examination Office</option>
                 </select>
               </label>
               <button className="btn primary" disabled={busyAction === 'admin'}>
@@ -2510,7 +2887,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
                     <strong>{managedAdmin.email}</strong>
                     <span>{managedAdmin.role === 'SUPER_ADMIN'
                       ? 'Super Admin · All schools'
-                      : `${managedAdmin.role === 'COORDINATOR' ? 'Lecture Coordinator' : 'School Admin'} · ${managedAdmin.school}`}</span>
+                      : `${managedAdmin.role === 'COORDINATOR'
+                        ? 'Lecture Coordinator'
+                        : managedAdmin.role === 'EXAM_OFFICER' ? 'Examination Office' : 'School Admin'} · ${managedAdmin.school}`}</span>
                   </li>
                 ))}
               </ul>
@@ -2783,7 +3162,8 @@ function AdminApp({ onLogout, superAdmin = false }) {
             placeholder="Search by course, room, or date…" label="Search scheduled exams" />
           {!exams.length && (examSearch ? noSearchResults(examSearch) : <p className="muted">No exams scheduled yet.</p>)}
           {groupExamSessions(exams).map((session) => (
-            <ExamSessionCard key={session.key} session={session} onDelete={deleteExam} busyExamId={busyExamId} />
+            <ExamSessionCard key={session.key} session={session} onDelete={deleteExam}
+              onEdit={startExamEdit} busyExamId={busyExamId} />
           ))}
         </section>
       </div>}
@@ -3064,6 +3444,47 @@ function AdminApp({ onLogout, superAdmin = false }) {
           </header>
           <ChatPanel key={targetRoom} admin targetRoom={targetRoom} fullPage />
         </section>
+      )}
+      {editingExam && (
+        <Modal title="Edit exam" onClose={() => setEditingExam(null)} className="exam-edit-modal">
+          <h2>Edit exam</h2>
+          <p className="muted small">{editingExam.code} — {editingExam.courseName}</p>
+          <form className="form" onSubmit={saveExamEdit}>
+            <label>Exam date
+              <input type="date" required value={examEditForm.examDate}
+                onChange={(event) => setExamEditForm({ ...examEditForm, examDate: event.target.value })} />
+            </label>
+            <div className="form-row">
+              <label>Start time
+                <input type="time" required value={examEditForm.startTime}
+                  onChange={(event) => setExamEditForm({ ...examEditForm, startTime: event.target.value })} />
+              </label>
+              <label>End time
+                <input type="time" required value={examEditForm.endTime}
+                  onChange={(event) => setExamEditForm({ ...examEditForm, endTime: event.target.value })} />
+              </label>
+            </div>
+            <label>Room
+              <input required maxLength={50} value={examEditForm.room}
+                onChange={(event) => setExamEditForm({ ...examEditForm, room: event.target.value })} />
+            </label>
+            <label>Program
+              <select value={examEditForm.program}
+                onChange={(event) => setExamEditForm({ ...examEditForm, program: event.target.value })}>
+                {PROGRAM_MODES.map((mode) => <option key={mode} value={mode}>{mode}</option>)}
+                <option value="BOTH">All program modes</option>
+                <option value="ALL">All students</option>
+              </select>
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setEditingExam(null)}
+                disabled={busyExamId === editingExam.id}>Cancel</button>
+              <button type="submit" className="btn primary" disabled={busyExamId === editingExam.id}>
+                {busyExamId === editingExam.id ? 'Saving…' : 'Save changes'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
     </main>
   );

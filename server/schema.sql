@@ -10,12 +10,12 @@ CREATE TABLE IF NOT EXISTS admins (
   email VARCHAR(100) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL') NOT NULL,
-  role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR') NOT NULL,
+  role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER') NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 ALTER TABLE admins
-  MODIFY COLUMN role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR') NOT NULL;
+  MODIFY COLUMN role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER') NOT NULL;
 
 CREATE TABLE IF NOT EXISTS students (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -173,14 +173,39 @@ CREATE TABLE IF NOT EXISTS exams (
   room VARCHAR(50) NOT NULL,
   program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH', 'ALL') NOT NULL DEFAULT 'BOTH',
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL DEFAULT 'Other',
+  invigilator_id INT NULL,
+  room_assigned_by INT NULL,
+  status ENUM('PENDING', 'SCHEDULED', 'ONGOING', 'COMPLETED') NOT NULL DEFAULT 'PENDING',
   source_sheet VARCHAR(50) NULL,
   source_row INT UNSIGNED NULL,
   source_column TINYINT UNSIGNED NULL,
   source_date_label VARCHAR(100) NULL,
   source_text TEXT NULL,
+  KEY idx_exams_invigilator_id (invigilator_id),
   CONSTRAINT fk_exam_course FOREIGN KEY (course_unit_id)
     REFERENCES course_units(id) ON DELETE CASCADE,
+  CONSTRAINT fk_exam_invigilator FOREIGN KEY (invigilator_id)
+    REFERENCES lecturers(id) ON DELETE SET NULL,
+  CONSTRAINT fk_exam_room_assigned_by FOREIGN KEY (room_assigned_by)
+    REFERENCES admins(id) ON DELETE SET NULL,
   UNIQUE KEY uniq_exam_source (course_unit_id, source_sheet, source_row, source_column)
+);
+
+CREATE TABLE IF NOT EXISTS malpractice_cases (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  exam_id INT NOT NULL,
+  student_id INT NOT NULL,
+  reported_by INT NOT NULL,
+  description TEXT NOT NULL,
+  status ENUM('PENDING', 'RESOLVED', 'DISMISSED') NOT NULL DEFAULT 'PENDING',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_malpractice_cases_status_created (status, created_at),
+  CONSTRAINT fk_malpractice_exam FOREIGN KEY (exam_id)
+    REFERENCES exams(id) ON DELETE CASCADE,
+  CONSTRAINT fk_malpractice_student FOREIGN KEY (student_id)
+    REFERENCES students(id) ON DELETE CASCADE,
+  CONSTRAINT fk_malpractice_reporter FOREIGN KEY (reported_by)
+    REFERENCES lecturers(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -379,6 +404,18 @@ CALL add_column_if_missing(
   'school',
   'ENUM(''SCI'', ''SBA'', ''SOSS'', ''LAW'', ''Nursing'', ''EDU'', ''Other'') NOT NULL DEFAULT ''Other'''
 );
+CALL add_column_if_missing('exams', 'invigilator_id', 'INT NULL');
+CALL add_column_if_missing('exams', 'room_assigned_by', 'INT NULL');
+CALL add_column_if_missing(
+  'exams',
+  'status',
+  'ENUM(''PENDING'', ''SCHEDULED'', ''ONGOING'', ''COMPLETED'') NOT NULL DEFAULT ''PENDING'''
+);
+CALL add_index_if_missing(
+  'exams',
+  'idx_exams_invigilator_id',
+  'KEY idx_exams_invigilator_id (invigilator_id)'
+);
 CALL add_column_if_missing('exams', 'source_sheet', 'VARCHAR(50) NULL');
 CALL add_column_if_missing('exams', 'source_row', 'INT UNSIGNED NULL');
 CALL add_column_if_missing('exams', 'source_column', 'TINYINT UNSIGNED NULL');
@@ -461,6 +498,16 @@ CALL add_constraint_if_missing(
   'class_schedules',
   'fk_class_schedule_code_admin',
   'CONSTRAINT fk_class_schedule_code_admin FOREIGN KEY (session_code_generated_by) REFERENCES admins(id) ON DELETE SET NULL'
+);
+CALL add_constraint_if_missing(
+  'exams',
+  'fk_exam_invigilator',
+  'CONSTRAINT fk_exam_invigilator FOREIGN KEY (invigilator_id) REFERENCES lecturers(id) ON DELETE SET NULL'
+);
+CALL add_constraint_if_missing(
+  'exams',
+  'fk_exam_room_assigned_by',
+  'CONSTRAINT fk_exam_room_assigned_by FOREIGN KEY (room_assigned_by) REFERENCES admins(id) ON DELETE SET NULL'
 );
 
 DROP PROCEDURE add_column_if_missing;

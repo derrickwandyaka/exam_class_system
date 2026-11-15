@@ -112,7 +112,7 @@ function auth(role) {
       const payload = jwt.verify(token, jwtSecret);
       const requestedRoles = Array.isArray(role) ? role : [role];
       const allowedRoles = requestedRoles.includes('admin')
-        ? [...requestedRoles, 'SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR']
+        ? [...requestedRoles, 'SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER']
         : requestedRoles;
       if (typeof payload === 'string' || !allowedRoles.includes(payload.role)) {
         return res.status(403).json({ error: 'Forbidden' });
@@ -120,7 +120,7 @@ function auth(role) {
       if (['student', 'lecturer'].includes(payload.role) && !Number.isInteger(payload.id)) {
         return res.status(401).json({ error: 'Invalid session' });
       }
-      if (['SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR'].includes(payload.role) &&
+      if (['SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER'].includes(payload.role) &&
           (!Number.isInteger(payload.admin_id) ||
            (payload.role !== 'SUPER_ADMIN' && !isOneOf(payload.school, schoolCodes)))) {
         return res.status(401).json({ error: 'Invalid admin session' });
@@ -139,6 +139,10 @@ function authSchoolAdmin(req, res, next) {
 
 function authCoordinator(req, res, next) {
   return auth('COORDINATOR')(req, res, next);
+}
+
+function authExamOfficer(req, res, next) {
+  return auth('EXAM_OFFICER')(req, res, next);
 }
 
 function isSuperAdmin(req) {
@@ -1433,6 +1437,91 @@ app.get('/api/lecturer/me', auth('lecturer'), asyncRoute(async (req, res) => {
   return res.json(lecturers[0]);
 }));
 
+app.get('/api/lecturer/invigilations', auth('lecturer'), asyncRoute(async (req, res) => {
+  const [exams] = await pool.query(
+    `SELECT e.id, e.exam_date AS examDate, e.start_time AS startTime,
+            e.end_time AS endTime, e.room, e.program, e.status,
+            cu.code, cu.name AS courseName, cu.degree_program AS degreeProgram,
+            (CONCAT(e.exam_date, ' ', e.start_time) <= NOW() OR
+             e.status IN ('ONGOING', 'COMPLETED')) AS canReport
+     FROM exams e
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     WHERE e.invigilator_id = ?
+     ORDER BY e.exam_date DESC, e.start_time DESC`,
+    [req.user.id]
+  );
+  return res.json(exams.map((exam) => ({
+    ...exam,
+    canReport: Boolean(exam.canReport)
+  })));
+}));
+
+app.get('/api/lecturer/invigilations/:id/students', auth('lecturer'), asyncRoute(async (req, res) => {
+  const examId = Number(req.params.id);
+  if (!Number.isInteger(examId) || examId < 1) {
+    return res.status(400).json({ error: 'Choose a valid exam' });
+  }
+  const [exams] = await pool.query(
+    `SELECT e.id
+     FROM exams e
+     WHERE e.id = ? AND e.invigilator_id = ?
+       AND (CONCAT(e.exam_date, ' ', e.start_time) <= NOW() OR
+            e.status IN ('ONGOING', 'COMPLETED'))`,
+    [examId, req.user.id]
+  );
+  if (!exams.length) return res.status(404).json({ error: 'Reportable invigilation not found' });
+
+  const [students] = await pool.query(
+    `SELECT DISTINCT s.id, s.first_name AS firstName, s.last_name AS lastName,
+            s.student_number AS studentNumber
+     FROM exams e
+     JOIN registrations r ON r.course_unit_id = e.course_unit_id
+     JOIN students s ON s.id = r.student_id
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     WHERE e.id = ? AND s.academic_level = cu.academic_level
+       AND (e.program IN ('BOTH', 'ALL') OR e.program = s.program)
+     ORDER BY s.last_name, s.first_name`,
+    [examId]
+  );
+  return res.json(students);
+}));
+
+app.post('/api/lecturer/report-malpractice', auth('lecturer'), asyncRoute(async (req, res) => {
+  const examId = Number(req.body.exam_id);
+  const studentId = Number(req.body.student_id);
+  const description = typeof req.body.description === 'string' ? req.body.description.trim() : '';
+  if (!Number.isInteger(examId) || examId < 1 ||
+      !Number.isInteger(studentId) || studentId < 1 ||
+      !description || description.length > 5000) {
+    return res.status(400).json({ error: 'Choose an exam and student, and enter a description of 1–5000 characters' });
+  }
+
+  const [eligibleStudents] = await pool.query(
+    `SELECT s.id
+     FROM exams e
+     JOIN registrations r ON r.course_unit_id = e.course_unit_id
+     JOIN students s ON s.id = r.student_id
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     WHERE e.id = ? AND e.invigilator_id = ? AND s.id = ?
+       AND s.academic_level = cu.academic_level
+       AND (e.program IN ('BOTH', 'ALL') OR e.program = s.program)
+       AND (CONCAT(e.exam_date, ' ', e.start_time) <= NOW() OR
+            e.status IN ('ONGOING', 'COMPLETED'))
+     LIMIT 1`,
+    [examId, req.user.id, studentId]
+  );
+  if (!eligibleStudents.length) {
+    return res.status(403).json({ error: 'You may only report a registered student for an ongoing or past exam assigned to you' });
+  }
+
+  const [result] = await pool.query(
+    `INSERT INTO malpractice_cases (exam_id, student_id, reported_by, description)
+     VALUES (?, ?, ?, ?)`,
+    [examId, studentId, req.user.id, description]
+  );
+  return res.status(201).json({ id: result.insertId, status: 'PENDING' });
+}));
+
 app.get('/api/lecturer/notifications', auth('lecturer'), asyncRoute(async (req, res) => {
   const [notifications] = await pool.query(
     `SELECT n.id, n.course_unit_id AS courseUnitId, n.message,
@@ -1631,7 +1720,7 @@ app.post('/api/superadmin/admins', auth('SUPER_ADMIN'), asyncRoute(async (req, r
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
       password.length < 12 || password.length > 200 ||
       !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other']) ||
-      !isOneOf(role, ['SCHOOL_ADMIN', 'COORDINATOR'])) {
+      !isOneOf(role, ['SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER'])) {
     return res.status(400).json({ error: 'Enter a valid email, school, and password (at least 12 characters)' });
   }
   try {
@@ -2113,6 +2202,100 @@ app.put('/api/admin/course-units/:id/coordinator', authSchoolAdmin, asyncRoute(a
   return res.json({ ok: true });
 }));
 
+app.get('/api/examofficer/exams', authExamOfficer, asyncRoute(async (req, res) => {
+  const [exams] = await pool.query(
+    `SELECT e.id, e.exam_date AS examDate, e.start_time AS startTime,
+            e.end_time AS endTime, e.room, e.program, e.status,
+            e.school, cu.code, cu.name AS courseName,
+            cu.degree_program AS degreeProgram,
+            e.invigilator_id AS invigilatorId, l.name AS invigilatorName
+     FROM exams e
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     LEFT JOIN lecturers l ON l.id = e.invigilator_id
+     ORDER BY e.exam_date, e.start_time, cu.code`
+  );
+  return res.json(exams);
+}));
+
+app.get('/api/examofficer/lecturers', authExamOfficer, asyncRoute(async (req, res) => {
+  const [lecturers] = await pool.query(
+    'SELECT id, name, email, school FROM lecturers ORDER BY name'
+  );
+  return res.json(lecturers);
+}));
+
+app.put('/api/examofficer/exams/:id/assign', authExamOfficer, asyncRoute(async (req, res) => {
+  const examId = Number(req.params.id);
+  const invigilatorId = Number(req.body.invigilatorId);
+  const room = typeof req.body.room === 'string' ? req.body.room.trim() : '';
+  if (!Number.isInteger(examId) || examId < 1 ||
+      !Number.isInteger(invigilatorId) || invigilatorId < 1 ||
+      !room || room.length > 50) {
+    return res.status(400).json({ error: 'Choose a valid exam, room, and invigilator' });
+  }
+
+  const [exams] = await pool.query(
+    'SELECT id FROM exams WHERE id = ?',
+    [examId]
+  );
+  if (!exams.length) return res.status(404).json({ error: 'Exam not found' });
+  const [lecturers] = await pool.query(
+    'SELECT id FROM lecturers WHERE id = ?',
+    [invigilatorId]
+  );
+  if (!lecturers.length) {
+    return res.status(400).json({ error: 'Choose a valid lecturer as the invigilator' });
+  }
+
+  await pool.query(
+    `UPDATE exams
+     SET room = ?, invigilator_id = ?, room_assigned_by = ?, status = 'SCHEDULED'
+     WHERE id = ?`,
+    [room, invigilatorId, req.user.admin_id, examId]
+  );
+  return res.json({ ok: true, status: 'SCHEDULED' });
+}));
+
+app.get('/api/examofficer/cases', authExamOfficer, asyncRoute(async (req, res) => {
+  const [cases] = await pool.query(
+    `SELECT mc.id, mc.exam_id AS examId, mc.student_id AS studentId,
+            mc.reported_by AS reportedBy, mc.description, mc.status,
+            mc.created_at AS createdAt,
+            CONCAT(s.first_name, ' ', s.last_name) AS studentName,
+            s.student_number AS studentNumber,
+            e.exam_date AS examDate, e.start_time AS startTime,
+            cu.code, cu.name AS courseName, l.name AS lecturerName
+     FROM malpractice_cases mc
+     JOIN students s ON s.id = mc.student_id
+     JOIN exams e ON e.id = mc.exam_id
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     JOIN lecturers l ON l.id = mc.reported_by
+     ORDER BY mc.created_at DESC, mc.id DESC`
+  );
+  return res.json(cases);
+}));
+
+app.put('/api/examofficer/cases/:id', authExamOfficer, asyncRoute(async (req, res) => {
+  const caseId = Number(req.params.id);
+  const { status } = req.body;
+  if (!Number.isInteger(caseId) || caseId < 1 ||
+      !isOneOf(status, ['RESOLVED', 'DISMISSED'])) {
+    return res.status(400).json({ error: 'Choose a valid case and resolution status' });
+  }
+  const [result] = await pool.query(
+    `UPDATE malpractice_cases SET status = ? WHERE id = ?`,
+    [status, caseId]
+  );
+  if (!result.affectedRows) {
+    const [existing] = await pool.query(
+      'SELECT id FROM malpractice_cases WHERE id = ?',
+      [caseId]
+    );
+    if (!existing.length) return res.status(404).json({ error: 'Malpractice case not found' });
+  }
+  return res.json({ ok: true, status });
+}));
+
 app.get('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   if (req.query.search !== undefined && typeof req.query.search !== 'string') {
@@ -2127,6 +2310,7 @@ app.get('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
   const [exams] = await pool.query(
     `SELECT e.id, cu.code, cu.name AS courseName, e.exam_date AS examDate,
             e.start_time AS startTime, e.end_time AS endTime, e.room, e.program,
+            e.status,
             e.school, cu.degree_program AS degreeProgram,
             e.source_text AS sourceText, e.source_sheet AS sourceSheet,
             e.source_row AS sourceRow, e.source_date_label AS sourceDateLabel
@@ -2184,6 +2368,37 @@ app.post('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
     parameters
   );
   return res.status(201).json({ id: result.insertId, scheduled: result.affectedRows });
+}));
+
+app.put('/api/admin/exams/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+  const examId = Number(req.params.id);
+  const { examDate, startTime, endTime, room, program } = req.body;
+  if (!Number.isInteger(examId) || examId < 1 ||
+      typeof examDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(examDate) ||
+      typeof startTime !== 'string' || !/^\d{2}:\d{2}$/.test(startTime) ||
+      typeof endTime !== 'string' || !/^\d{2}:\d{2}$/.test(endTime) ||
+      startTime >= endTime ||
+      typeof room !== 'string' || !room.trim() || room.trim().length > 50 ||
+      !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH', 'ALL'])) {
+    return res.status(400).json({ error: 'Enter a valid exam date, time range, room, and program' });
+  }
+
+  const scopeFilter = isSuperAdmin(req) ? '' : ' AND cu.school = ?';
+  const [exams] = await pool.query(
+    `SELECT e.id FROM exams e
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     WHERE e.id = ?${scopeFilter}`,
+    [examId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+  );
+  if (!exams.length) return res.status(404).json({ error: 'Exam not found in your school' });
+
+  await pool.query(
+    `UPDATE exams
+     SET exam_date = ?, start_time = ?, end_time = ?, room = ?, program = ?
+     WHERE id = ?`,
+    [examDate, `${startTime}:00`, `${endTime}:00`, room.trim(), program, examId]
+  );
+  return res.json({ ok: true });
 }));
 
 app.delete('/api/admin/exams/:id', authSchoolAdmin, asyncRoute(async (req, res) => {

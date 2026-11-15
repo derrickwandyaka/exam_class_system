@@ -93,6 +93,12 @@ server startup, `ADMIN_EMAIL` and
 email is not already present in the `admins` table. Keep these values private
 and use a strong password. The Super Admin can create school-scoped admins;
 School Admin API access is restricted to their assigned school.
+Super Admins can also provision Examination Office accounts. School Admins
+schedule exams within their school and can edit their date, time, room, and
+program. Examination Office users assign rooms and invigilators and review
+malpractice reports submitted by assigned lecturers. Lecturers can report
+malpractice for registered students in exams that have started or are marked
+ongoing/completed.
 
 The NKUMBA workbook timetable is tagged for the School of Computing and
 Informatics (`SCI`); the separate SBA Day timetable import is tagged `SBA`.
