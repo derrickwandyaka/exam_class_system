@@ -19,10 +19,11 @@ server/   Express API, MySQL schema, and environment variable example
 ## First-time setup
 
 1. Create or update the database tables and import the NKUMBA August 2026
-   examination workbook by running `server/schema.sql` in MySQL. The script
-   adds the degree-program and exam school/program columns to an existing
-   installation, migrates existing tables, and imports the Day, Weekend, and
-   Masters timetable entries. The workbook import is designed to be repeatable.
+   examination workbook by running `server/schema.sql` in MySQL.    The script adds the degree-program and exam school/program columns to an
+   existing installation, creates persistent chat read-state tracking for
+   unread-message badges, migrates existing tables, and imports the Day,
+   Weekend, and Masters timetable entries. The workbook import is designed to
+   be repeatable.
    For example, from PowerShell:
 
    ```powershell
@@ -80,7 +81,14 @@ port 5000.
 
 Students and administrators use the same sign-in form. The API determines the
 account role from the credentials and routes the user to the student timetable
-or the appropriate admin panel. On server startup, `ADMIN_EMAIL` and
+or the appropriate admin panel. Super Admins can create school-scoped admins
+and Lecture Coordinator accounts from Manage Admins. Assign each Lecture
+Coordinator to the course units they support from Manage. Coordinators can
+confirm assigned-unit lecture rooms, send in-app reminders to the assigned
+lecturer (using the email saved on the lecturer profile), and manage same-day
+attendance; students can check in to their ongoing registered classes with a
+coordinator-generated code. On
+server startup, `ADMIN_EMAIL` and
 `ADMIN_PASSWORD` are hashed and inserted as the initial Super Admin if that
 email is not already present in the `admins` table. Keep these values private
 and use a strong password. The Super Admin can create school-scoped admins;

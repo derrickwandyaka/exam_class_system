@@ -10,9 +10,12 @@ CREATE TABLE IF NOT EXISTS admins (
   email VARCHAR(100) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL') NOT NULL,
-  role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN') NOT NULL,
+  role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR') NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE admins
+  MODIFY COLUMN role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR') NOT NULL;
 
 CREATE TABLE IF NOT EXISTS students (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -63,14 +66,18 @@ CREATE TABLE IF NOT EXISTS course_units (
   degree_program VARCHAR(30) NOT NULL DEFAULT 'UNASSIGNED',
   academic_level ENUM('Certificate', 'Diploma', 'Degree', 'Masters', 'PhD') NOT NULL DEFAULT 'Degree',
   lecturer_id INT NULL,
+  coordinator_id INT NULL,
   is_public BOOLEAN NOT NULL DEFAULT FALSE,
   year_of_study TINYINT UNSIGNED NOT NULL,
   semester TINYINT UNSIGNED NOT NULL,
   KEY idx_course_units_lecturer_id (lecturer_id),
+  KEY idx_course_units_coordinator_id (coordinator_id),
   UNIQUE KEY uniq_course_offering
     (school, degree_program, academic_level, year_of_study, semester, code, name),
   CONSTRAINT fk_course_lecturer FOREIGN KEY (lecturer_id)
-    REFERENCES lecturers(id) ON DELETE SET NULL
+    REFERENCES lecturers(id) ON DELETE SET NULL,
+  CONSTRAINT fk_course_coordinator FOREIGN KEY (coordinator_id)
+    REFERENCES admins(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS class_schedules (
@@ -82,6 +89,8 @@ CREATE TABLE IF NOT EXISTS class_schedules (
   end_time TIME NOT NULL,
   room VARCHAR(50) NOT NULL,
   program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH') NOT NULL DEFAULT 'BOTH',
+  session_code VARCHAR(6) NULL,
+  session_code_generated_by INT NULL,
   KEY idx_class_schedules_course_program (course_unit_id, program),
   KEY idx_class_schedules_day_time (day_of_week, start_time),
   KEY idx_class_schedules_lecturer_id (lecturer_id),
@@ -89,6 +98,43 @@ CREATE TABLE IF NOT EXISTS class_schedules (
     REFERENCES course_units(id) ON DELETE CASCADE,
   CONSTRAINT fk_class_schedule_lecturer FOREIGN KEY (lecturer_id)
     REFERENCES lecturers(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS attendance (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  class_schedule_id INT NOT NULL,
+  student_id INT NOT NULL,
+  date DATE NOT NULL,
+  status ENUM('PRESENT', 'ABSENT', 'LATE') NOT NULL,
+  marked_by INT NULL,
+  UNIQUE KEY uniq_attendance_schedule_student_date (class_schedule_id, student_id, date),
+  KEY idx_attendance_student_date (student_id, date),
+  CONSTRAINT fk_attendance_schedule FOREIGN KEY (class_schedule_id)
+    REFERENCES class_schedules(id) ON DELETE CASCADE,
+  CONSTRAINT fk_attendance_student FOREIGN KEY (student_id)
+    REFERENCES students(id) ON DELETE CASCADE,
+  CONSTRAINT fk_attendance_admin FOREIGN KEY (marked_by)
+    REFERENCES admins(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS lecturer_notifications (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  lecturer_id INT NOT NULL,
+  course_unit_id INT NOT NULL,
+  class_schedule_id INT NOT NULL,
+  coordinator_admin_id INT NULL,
+  message VARCHAR(500) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  read_at TIMESTAMP NULL DEFAULT NULL,
+  KEY idx_lecturer_notifications_unread (lecturer_id, read_at, created_at),
+  CONSTRAINT fk_lecturer_notification_lecturer FOREIGN KEY (lecturer_id)
+    REFERENCES lecturers(id) ON DELETE CASCADE,
+  CONSTRAINT fk_lecturer_notification_course FOREIGN KEY (course_unit_id)
+    REFERENCES course_units(id) ON DELETE CASCADE,
+  CONSTRAINT fk_lecturer_notification_schedule FOREIGN KEY (class_schedule_id)
+    REFERENCES class_schedules(id) ON DELETE CASCADE,
+  CONSTRAINT fk_lecturer_notification_coordinator FOREIGN KEY (coordinator_admin_id)
+    REFERENCES admins(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS notes (
@@ -159,6 +205,16 @@ CREATE TABLE IF NOT EXISTS messages (
     REFERENCES lecturers(id) ON DELETE SET NULL,
   CONSTRAINT fk_message_course FOREIGN KEY (course_unit_id)
     REFERENCES course_units(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chat_read_states (
+  student_id INT NOT NULL,
+  room_key VARCHAR(100) NOT NULL,
+  last_read_message_id INT NOT NULL DEFAULT 0,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (student_id, room_key),
+  CONSTRAINT fk_chat_read_student FOREIGN KEY (student_id)
+    REFERENCES students(id) ON DELETE CASCADE
 );
 
 DROP PROCEDURE IF EXISTS add_column_if_missing;
@@ -301,10 +357,13 @@ CALL add_column_if_missing('students', 'profile_picture', 'LONGTEXT NULL');
 CALL add_column_if_missing('students', 'phone_number', 'VARCHAR(20) NULL');
 CALL add_column_if_missing('registrations', 'is_completed', 'BOOLEAN NOT NULL DEFAULT FALSE');
 CALL add_column_if_missing('course_units', 'lecturer_id', 'INT NULL');
+CALL add_column_if_missing('course_units', 'coordinator_id', 'INT NULL');
 CALL add_column_if_missing('course_units', 'is_public', 'BOOLEAN NOT NULL DEFAULT FALSE');
 CALL add_column_if_missing('messages', 'course_unit_id', 'INT NULL');
 CALL add_column_if_missing('messages', 'sender_lecturer_id', 'INT NULL');
 CALL add_column_if_missing('messages', 'edited_at', 'TIMESTAMP NULL DEFAULT NULL');
+CALL add_column_if_missing('class_schedules', 'session_code', 'VARCHAR(6) NULL');
+CALL add_column_if_missing('class_schedules', 'session_code_generated_by', 'INT NULL');
 CALL add_column_if_missing(
   'messages',
   'target_school',
@@ -359,6 +418,11 @@ CALL add_index_if_missing(
   'KEY idx_course_units_lecturer_id (lecturer_id)'
 );
 CALL add_index_if_missing(
+  'course_units',
+  'idx_course_units_coordinator_id',
+  'KEY idx_course_units_coordinator_id (coordinator_id)'
+);
+CALL add_index_if_missing(
   'class_schedules',
   'idx_class_schedules_course_program',
   'KEY idx_class_schedules_course_program (course_unit_id, program)'
@@ -379,6 +443,11 @@ CALL add_constraint_if_missing(
   'CONSTRAINT fk_course_lecturer FOREIGN KEY (lecturer_id) REFERENCES lecturers(id) ON DELETE SET NULL'
 );
 CALL add_constraint_if_missing(
+  'course_units',
+  'fk_course_coordinator',
+  'CONSTRAINT fk_course_coordinator FOREIGN KEY (coordinator_id) REFERENCES admins(id) ON DELETE SET NULL'
+);
+CALL add_constraint_if_missing(
   'messages',
   'fk_message_course',
   'CONSTRAINT fk_message_course FOREIGN KEY (course_unit_id) REFERENCES course_units(id) ON DELETE CASCADE'
@@ -387,6 +456,11 @@ CALL add_constraint_if_missing(
   'messages',
   'fk_message_lecturer',
   'CONSTRAINT fk_message_lecturer FOREIGN KEY (sender_lecturer_id) REFERENCES lecturers(id) ON DELETE SET NULL'
+);
+CALL add_constraint_if_missing(
+  'class_schedules',
+  'fk_class_schedule_code_admin',
+  'CONSTRAINT fk_class_schedule_code_admin FOREIGN KEY (session_code_generated_by) REFERENCES admins(id) ON DELETE SET NULL'
 );
 
 DROP PROCEDURE add_column_if_missing;

@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import multer from 'multer';
-import { createHash, randomUUID } from 'crypto';
+import { createHash, randomInt, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { mkdir, open, unlink } from 'fs/promises';
 import path from 'path';
@@ -112,7 +112,7 @@ function auth(role) {
       const payload = jwt.verify(token, jwtSecret);
       const requestedRoles = Array.isArray(role) ? role : [role];
       const allowedRoles = requestedRoles.includes('admin')
-        ? [...requestedRoles, 'SUPER_ADMIN', 'SCHOOL_ADMIN']
+        ? [...requestedRoles, 'SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR']
         : requestedRoles;
       if (typeof payload === 'string' || !allowedRoles.includes(payload.role)) {
         return res.status(403).json({ error: 'Forbidden' });
@@ -120,9 +120,9 @@ function auth(role) {
       if (['student', 'lecturer'].includes(payload.role) && !Number.isInteger(payload.id)) {
         return res.status(401).json({ error: 'Invalid session' });
       }
-      if (['SUPER_ADMIN', 'SCHOOL_ADMIN'].includes(payload.role) &&
+      if (['SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR'].includes(payload.role) &&
           (!Number.isInteger(payload.admin_id) ||
-           (payload.role === 'SCHOOL_ADMIN' && !isOneOf(payload.school, schoolCodes)))) {
+           (payload.role !== 'SUPER_ADMIN' && !isOneOf(payload.school, schoolCodes)))) {
         return res.status(401).json({ error: 'Invalid admin session' });
       }
       req.user = payload;
@@ -137,8 +137,29 @@ function authSchoolAdmin(req, res, next) {
   return auth(['SUPER_ADMIN', 'SCHOOL_ADMIN'])(req, res, next);
 }
 
+function authCoordinator(req, res, next) {
+  return auth('COORDINATOR')(req, res, next);
+}
+
 function isSuperAdmin(req) {
   return req.user.role === 'SUPER_ADMIN';
+}
+
+async function getCoordinatorSchedule(scheduleId, coordinatorId, school) {
+  const [schedules] = await pool.query(
+    `SELECT cs.id, cs.course_unit_id AS courseUnitId, cs.program,
+            cs.day_of_week AS dayOfWeek, cs.start_time AS startTime, cs.end_time AS endTime,
+            (cs.day_of_week = DAYNAME(CURDATE())) AS isToday,
+            cu.school, cu.academic_level AS academicLevel, cu.code, cu.name AS courseName,
+            COALESCE(cs.lecturer_id, cu.lecturer_id) AS lecturerId,
+            l.name AS lecturerName, l.email AS lecturerEmail
+     FROM class_schedules cs
+     JOIN course_units cu ON cu.id = cs.course_unit_id
+     LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
+     WHERE cs.id = ? AND cu.coordinator_id = ? AND cu.school = ?`,
+    [scheduleId, coordinatorId, school]
+  );
+  return schedules[0] || null;
 }
 
 function adminSchoolFilter(req, column) {
@@ -633,7 +654,7 @@ app.get('/api/classes', auth('student'), asyncRoute(async (req, res) => {
             cu.academic_level AS academicLevel,
             cs.day_of_week AS dayOfWeek, cs.start_time AS startTime,
             cs.end_time AS endTime, cs.room, cs.program,
-            l.name AS lecturerName
+            l.name AS lecturerName, att.status AS attendanceStatus
      FROM students s
      JOIN registrations r ON r.student_id = s.id
      JOIN course_units cu ON cu.id = r.course_unit_id
@@ -642,6 +663,10 @@ app.get('/api/classes', auth('student'), asyncRoute(async (req, res) => {
        ON cs.course_unit_id = cu.id
        AND (cs.program = 'BOTH' OR cs.program = s.program)
      LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
+     LEFT JOIN attendance att
+       ON att.class_schedule_id = cs.id
+       AND att.student_id = s.id
+       AND att.date = CURDATE()
      WHERE s.id = ?
        ${searchFilter}
      ORDER BY (cs.id IS NULL), FIELD(cs.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
@@ -651,6 +676,267 @@ app.get('/api/classes', auth('student'), asyncRoute(async (req, res) => {
       : [req.user.id]
   );
   return res.json(classes);
+}));
+
+app.get('/api/coordinator/me', authCoordinator, (req, res) => {
+  return res.json({
+    id: req.user.admin_id,
+    role: req.user.role,
+    school: req.user.school
+  });
+});
+
+app.get('/api/coordinator/lectures', authCoordinator, asyncRoute(async (req, res) => {
+  const [lectures] = await pool.query(
+    `SELECT cs.id, cu.code, cu.name AS courseName,
+            cs.day_of_week AS dayOfWeek, cs.start_time AS startTime,
+            cs.end_time AS endTime, cs.room, cs.program, l.name AS lecturerName,
+            l.email AS lecturerEmail,
+            COUNT(DISTINCT s.id) AS studentCount,
+            COUNT(DISTINCT CASE WHEN att.status IN ('PRESENT', 'LATE') THEN att.student_id END) AS attendedCount
+     FROM class_schedules cs
+     JOIN course_units cu ON cu.id = cs.course_unit_id
+     LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
+     LEFT JOIN registrations r ON r.course_unit_id = cu.id
+     LEFT JOIN students s ON s.id = r.student_id
+       AND s.school = cu.school
+       AND s.academic_level = cu.academic_level
+       AND (cs.program = 'BOTH' OR cs.program = s.program)
+     LEFT JOIN attendance att
+       ON att.class_schedule_id = cs.id
+       AND att.student_id = s.id
+       AND att.date = CURDATE()
+     WHERE cu.coordinator_id = ? AND cu.school = ? AND cs.day_of_week = DAYNAME(CURDATE())
+     GROUP BY cs.id, cu.code, cu.name, cs.day_of_week, cs.start_time, cs.end_time,
+              cs.room, cs.program, l.name, l.email
+     ORDER BY cs.start_time, cu.code`,
+    [req.user.admin_id, req.user.school]
+  );
+  return res.json(lectures);
+}));
+
+app.get('/api/coordinator/schedule/:id/students', authCoordinator, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.params.id);
+  if (!Number.isInteger(scheduleId) || scheduleId < 1) {
+    return res.status(400).json({ error: 'Choose a valid class schedule' });
+  }
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  if (!schedule.isToday) {
+    return res.status(400).json({ error: 'Attendance can only be taken for today’s lectures' });
+  }
+
+  const [students] = await pool.query(
+    `SELECT s.id, s.first_name AS firstName, s.last_name AS lastName,
+            s.student_number AS studentNumber, att.status
+     FROM registrations r
+     JOIN students s ON s.id = r.student_id
+     LEFT JOIN attendance att
+       ON att.class_schedule_id = ? AND att.student_id = s.id AND att.date = CURDATE()
+     WHERE r.course_unit_id = ?
+       AND s.school = ?
+       AND s.academic_level = ?
+       AND (? = 'BOTH' OR s.program = ?)
+     ORDER BY s.last_name, s.first_name, s.student_number`,
+    [
+      scheduleId, schedule.courseUnitId, schedule.school, schedule.academicLevel,
+      schedule.program, schedule.program
+    ]
+  );
+  return res.json(students);
+}));
+
+app.put('/api/coordinator/schedule/:id/room', authCoordinator, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.params.id);
+  const room = typeof req.body.room === 'string' ? req.body.room.trim() : '';
+  if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
+      !room || room.length > 50) {
+    return res.status(400).json({ error: 'Enter a valid class schedule and room (up to 50 characters)' });
+  }
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  const [previousRooms] = await pool.query(
+    'SELECT room FROM class_schedules WHERE id = ?',
+    [scheduleId]
+  );
+  const previousRoom = previousRooms[0].room;
+  if (previousRoom === room) return res.json({ ok: true, room, previousRoom });
+  const [updateResult] = await pool.query(
+    'UPDATE class_schedules SET room = ? WHERE id = ?',
+    [room, scheduleId]
+  );
+  if (!updateResult.affectedRows && previousRoom !== room) {
+    return res.status(404).json({ error: 'Class schedule no longer exists' });
+  }
+
+  const [recipients] = await pool.query(
+    `SELECT DISTINCT s.id
+     FROM registrations r
+     JOIN students s ON s.id = r.student_id
+     WHERE r.course_unit_id = ?
+       AND s.school = ?
+       AND s.academic_level = ?
+       AND (? = 'BOTH' OR s.program = ?)`,
+    [
+      schedule.courseUnitId, schedule.school, schedule.academicLevel,
+      schedule.program, schedule.program
+    ]
+  );
+  await sendPushToStudents(recipients.map((student) => student.id), {
+    title: 'Lecture room changed',
+    body: `${schedule.code} — ${schedule.courseName}: ${previousRoom} → ${room}`,
+    data: { url: '/' }
+  });
+  return res.json({ ok: true, room, previousRoom });
+}));
+
+app.post('/api/coordinator/schedule/:id/generate-code', authCoordinator, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.params.id);
+  if (!Number.isInteger(scheduleId) || scheduleId < 1) {
+    return res.status(400).json({ error: 'Choose a valid class schedule' });
+  }
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  if (!schedule.isToday) {
+    return res.status(400).json({ error: 'A check-in code can only be generated for today’s lectures' });
+  }
+
+  const code = String(randomInt(0, 10000)).padStart(4, '0');
+  await pool.query(
+    `UPDATE class_schedules
+     SET session_code = ?, session_code_generated_by = ?
+     WHERE id = ?`,
+    [code, req.user.admin_id, scheduleId]
+  );
+  return res.json({ code });
+}));
+
+app.post('/api/coordinator/schedule/:id/remind-lecturer', authCoordinator, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.params.id);
+  if (!Number.isInteger(scheduleId) || scheduleId < 1) {
+    return res.status(400).json({ error: 'Choose a valid class schedule' });
+  }
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  if (!schedule.lecturerId) return res.status(400).json({ error: 'Assign a lecturer to this course unit first' });
+
+  const message = `${schedule.code} — ${schedule.courseName} is scheduled for ${schedule.dayOfWeek} at ${schedule.startTime} in ${schedule.room}.`;
+  const [result] = await pool.query(
+    `INSERT INTO lecturer_notifications
+       (lecturer_id, course_unit_id, class_schedule_id, coordinator_admin_id, message)
+     VALUES (?, ?, ?, ?, ?)`,
+    [schedule.lecturerId, schedule.courseUnitId, scheduleId, req.user.admin_id, message]
+  );
+  return res.status(201).json({ id: result.insertId, lecturerEmail: schedule.lecturerEmail });
+}));
+
+app.post('/api/coordinator/attendance', authCoordinator, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.body?.scheduleId);
+  const students = req.body?.students;
+  if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
+      !Array.isArray(students) || !students.length || students.length > 500) {
+    return res.status(400).json({ error: 'Choose a valid schedule and attendance list' });
+  }
+
+  const normalizedStudents = [];
+  const seenStudentIds = new Set();
+  for (const student of students) {
+    const studentId = Number(student?.student_id);
+    if (!Number.isInteger(studentId) || studentId < 1 ||
+        !isOneOf(student.status, ['PRESENT', 'ABSENT', 'LATE']) ||
+        seenStudentIds.has(studentId)) {
+      return res.status(400).json({ error: 'Attendance entries must have unique student IDs and valid statuses' });
+    }
+    seenStudentIds.add(studentId);
+    normalizedStudents.push({ studentId, status: student.status });
+  }
+
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  if (!schedule.isToday) {
+    return res.status(400).json({ error: 'Attendance can only be taken for today’s lectures' });
+  }
+
+  const [eligibleStudents] = await pool.query(
+    `SELECT s.id
+     FROM registrations r
+     JOIN students s ON s.id = r.student_id
+     WHERE r.course_unit_id = ?
+       AND s.school = ?
+       AND s.academic_level = ?
+       AND (? = 'BOTH' OR s.program = ?)
+       AND s.id IN (?)`,
+    [
+      schedule.courseUnitId, schedule.school, schedule.academicLevel,
+      schedule.program, schedule.program,
+      normalizedStudents.map((student) => student.studentId)
+    ]
+  );
+  if (eligibleStudents.length !== normalizedStudents.length) {
+    return res.status(403).json({ error: 'Attendance includes students not registered for this class' });
+  }
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    for (const student of normalizedStudents) {
+      await connection.query(
+        `INSERT INTO attendance
+           (class_schedule_id, student_id, date, status, marked_by)
+         VALUES (?, ?, CURDATE(), ?, ?)
+         ON DUPLICATE KEY UPDATE status = VALUES(status), marked_by = VALUES(marked_by)`,
+        [scheduleId, student.studentId, student.status, req.user.admin_id]
+      );
+    }
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  return res.json({ ok: true, markedCount: normalizedStudents.length });
+}));
+
+app.post('/api/student/check-in', auth('student'), asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.body?.scheduleId);
+  const sessionCode = typeof req.body?.sessionCode === 'string' ? req.body.sessionCode.trim() : '';
+  if (!Number.isInteger(scheduleId) || scheduleId < 1 || !/^\d{4}$/.test(sessionCode)) {
+    return res.status(400).json({ error: 'Enter a valid four-digit code for your class' });
+  }
+
+  const [schedules] = await pool.query(
+    `SELECT cs.id, cs.course_unit_id AS courseUnitId, cs.session_code AS sessionCode,
+            cs.session_code_generated_by AS codeGeneratedBy,
+            cs.start_time AS startTime, cs.end_time AS endTime
+     FROM class_schedules cs
+     JOIN course_units cu ON cu.id = cs.course_unit_id
+     JOIN registrations r ON r.course_unit_id = cu.id AND r.student_id = ?
+     JOIN students s ON s.id = r.student_id
+     WHERE cs.id = ?
+       AND cu.school = s.school
+       AND cu.academic_level = s.academic_level
+       AND (cs.program = 'BOTH' OR cs.program = s.program)
+       AND cs.day_of_week = DAYNAME(CURDATE())
+       AND CURTIME() BETWEEN cs.start_time AND cs.end_time`,
+    [req.user.id, scheduleId]
+  );
+  if (!schedules.length) {
+    return res.status(403).json({ error: 'You are not registered for this ongoing class' });
+  }
+  const schedule = schedules[0];
+  if (schedule.sessionCode !== sessionCode) {
+    return res.status(400).json({ error: 'That check-in code is incorrect or has expired' });
+  }
+
+  await pool.query(
+    `INSERT INTO attendance
+       (class_schedule_id, student_id, date, status, marked_by)
+     VALUES (?, ?, CURDATE(), 'PRESENT', ?)
+     ON DUPLICATE KEY UPDATE status = 'PRESENT', marked_by = VALUES(marked_by)`,
+    [scheduleId, req.user.id, schedule.codeGeneratedBy]
+  );
+  return res.json({ status: 'PRESENT' });
 }));
 
 app.post('/api/registrations', auth('student'), asyncRoute(async (req, res) => {
@@ -788,6 +1074,116 @@ app.get('/api/messages', auth('student'), asyncRoute(async (req, res) => {
     [courseUnitId, targetRoom, courseUnitId, students[0].school]
   );
   return res.json(formatMessages(messages));
+}));
+
+app.get('/api/chat/unread', auth('student'), asyncRoute(async (req, res) => {
+  const [students] = await pool.query(
+    `SELECT school, degree_program AS degreeProgram, program,
+            year_of_study AS yearOfStudy, semester
+     FROM students WHERE id = ?`,
+    [req.user.id]
+  );
+  if (!students.length) return res.status(401).json({ error: 'Invalid session' });
+
+  const student = students[0];
+  const [generalCounts] = await pool.query(
+    `SELECT COUNT(*) AS unreadCount
+     FROM messages m
+     LEFT JOIN chat_read_states rs
+       ON rs.student_id = ? AND rs.room_key = 'general'
+     WHERE m.course_unit_id IS NULL
+       AND m.target_room IN (?, 'GLOBAL')
+       AND m.target_school IN (?, 'ALL')
+       AND m.id > COALESCE(rs.last_read_message_id, 0)
+       AND (m.sender_id IS NULL OR m.sender_id <> ?)`,
+    [req.user.id, getRoomId(student), student.school, req.user.id]
+  );
+  const [courseCounts] = await pool.query(
+    `SELECT cu.id AS courseUnitId, COUNT(m.id) AS unreadCount
+     FROM registrations r
+     JOIN students s ON s.id = r.student_id
+     JOIN course_units cu ON cu.id = r.course_unit_id
+       AND cu.academic_level = s.academic_level
+     LEFT JOIN chat_read_states rs
+       ON rs.student_id = s.id AND rs.room_key = CONCAT('course:', cu.id)
+     LEFT JOIN messages m
+       ON m.course_unit_id = cu.id
+       AND m.id > COALESCE(rs.last_read_message_id, 0)
+       AND (m.sender_id IS NULL OR m.sender_id <> s.id)
+     WHERE r.student_id = ?
+     GROUP BY cu.id`,
+    [req.user.id]
+  );
+
+  const rooms = {
+    general: Number(generalCounts[0].unreadCount),
+    ...Object.fromEntries(courseCounts.map((course) => [
+      `course-${course.courseUnitId}`,
+      Number(course.unreadCount)
+    ]))
+  };
+  return res.json({
+    rooms,
+    total: Object.values(rooms).reduce((total, count) => total + count, 0)
+  });
+}));
+
+app.post('/api/chat/read', auth('student'), asyncRoute(async (req, res) => {
+  const courseUnitId = req.body?.courseUnitId === undefined || req.body.courseUnitId === null
+    ? null
+    : Number(req.body.courseUnitId);
+  const requestedLastReadMessageId = Number(req.body?.lastReadMessageId);
+  if (courseUnitId !== null && (!Number.isInteger(courseUnitId) || courseUnitId < 1)) {
+    return res.status(400).json({ error: 'Choose a valid course chat' });
+  }
+  if (!Number.isSafeInteger(requestedLastReadMessageId) || requestedLastReadMessageId < 1) {
+    return res.status(400).json({ error: 'Choose a valid last-read message' });
+  }
+
+  const [students] = await pool.query(
+    `SELECT school, degree_program AS degreeProgram, program,
+            year_of_study AS yearOfStudy, semester
+     FROM students WHERE id = ?`,
+    [req.user.id]
+  );
+  if (!students.length) return res.status(401).json({ error: 'Invalid session' });
+  const student = students[0];
+
+  let roomKey = 'general';
+  let latestMessage;
+  if (courseUnitId === null) {
+    [latestMessage] = await pool.query(
+      `SELECT COALESCE(MAX(id), 0) AS messageId
+       FROM messages
+       WHERE course_unit_id IS NULL
+         AND target_room IN (?, 'GLOBAL')
+         AND target_school IN (?, 'ALL')`,
+      [getRoomId(student), student.school]
+    );
+  } else {
+    if (!(await studentCanAccessCourseUnit(req.user.id, courseUnitId))) {
+      return res.status(403).json({ error: 'You are not enrolled in this course chat' });
+    }
+    roomKey = `course:${courseUnitId}`;
+    [latestMessage] = await pool.query(
+      'SELECT COALESCE(MAX(id), 0) AS messageId FROM messages WHERE course_unit_id = ?',
+      [courseUnitId]
+    );
+  }
+
+  const lastReadMessageId = Math.min(
+    requestedLastReadMessageId,
+    Number(latestMessage[0].messageId)
+  );
+  await pool.query(
+    `INSERT INTO chat_read_states (student_id, room_key, last_read_message_id)
+     VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       last_read_message_id = GREATEST(last_read_message_id, VALUES(last_read_message_id)),
+       updated_at = CURRENT_TIMESTAMP`,
+    [req.user.id, roomKey, lastReadMessageId]
+  );
+  return res.json({ ok: true });
 }));
 
 app.post('/api/messages', auth('student'), asyncRoute(async (req, res) => {
@@ -1007,7 +1403,16 @@ app.get('/api/notes/:id/download', auth(['student', 'lecturer', 'admin']), async
     }
   } else if (req.user.role === 'lecturer' && Number(note.lecturerId) !== Number(req.user.id)) {
     return res.status(403).json({ error: 'You are not assigned to this note' });
+  } else if (req.user.role === 'COORDINATOR') {
+    const [assignments] = await pool.query(
+      'SELECT id FROM course_units WHERE id = ? AND coordinator_id = ?',
+      [note.courseUnitId, req.user.admin_id]
+    );
+    if (!assignments.length) {
+      return res.status(403).json({ error: 'You are not assigned to this course unit' });
+    }
   }
+
   const fileName = path.basename(note.filePath);
   const filePath = path.join(uploadDirectory, fileName);
   return res.download(filePath, `${note.title}${path.extname(fileName)}`, (error) => {
@@ -1026,6 +1431,40 @@ app.get('/api/lecturer/me', auth('lecturer'), asyncRoute(async (req, res) => {
   );
   if (!lecturers.length) return res.status(404).json({ error: 'Lecturer account not found' });
   return res.json(lecturers[0]);
+}));
+
+app.get('/api/lecturer/notifications', auth('lecturer'), asyncRoute(async (req, res) => {
+  const [notifications] = await pool.query(
+    `SELECT n.id, n.course_unit_id AS courseUnitId, n.message,
+            n.created_at AS createdAt, cu.code, cu.name AS courseName
+     FROM lecturer_notifications n
+     JOIN course_units cu ON cu.id = n.course_unit_id
+     WHERE n.lecturer_id = ? AND n.read_at IS NULL
+     ORDER BY n.created_at DESC
+     LIMIT 50`,
+    [req.user.id]
+  );
+  return res.json(notifications);
+}));
+
+app.post('/api/lecturer/notifications/:id/read', auth('lecturer'), asyncRoute(async (req, res) => {
+  const notificationId = Number(req.params.id);
+  if (!Number.isInteger(notificationId) || notificationId < 1) {
+    return res.status(400).json({ error: 'Choose a valid reminder' });
+  }
+  const [result] = await pool.query(
+    `UPDATE lecturer_notifications SET read_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND lecturer_id = ? AND read_at IS NULL`,
+    [notificationId, req.user.id]
+  );
+  if (!result.affectedRows) {
+    const [existing] = await pool.query(
+      'SELECT id FROM lecturer_notifications WHERE id = ? AND lecturer_id = ?',
+      [notificationId, req.user.id]
+    );
+    if (!existing.length) return res.status(404).json({ error: 'Reminder not found' });
+  }
+  return res.json({ ok: true });
 }));
 
 app.get('/api/lecturer/courses', auth('lecturer'), asyncRoute(async (req, res) => {
@@ -1188,17 +1627,19 @@ app.post('/api/superadmin/admins', auth('SUPER_ADMIN'), asyncRoute(async (req, r
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   const school = req.body.school;
+  const role = req.body.role || 'SCHOOL_ADMIN';
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
       password.length < 12 || password.length > 200 ||
-      !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other'])) {
+      !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other']) ||
+      !isOneOf(role, ['SCHOOL_ADMIN', 'COORDINATOR'])) {
     return res.status(400).json({ error: 'Enter a valid email, school, and password (at least 12 characters)' });
   }
   try {
     const passwordHash = await bcrypt.hash(password, 10);
     const [result] = await pool.query(
       `INSERT INTO admins (email, password_hash, school, role)
-       VALUES (?, ?, ?, 'SCHOOL_ADMIN')`,
-      [email, passwordHash, school]
+       VALUES (?, ?, ?, ?)`,
+      [email, passwordHash, school, role]
     );
     return res.status(201).json({ id: result.insertId });
   } catch (error) {
@@ -1236,6 +1677,17 @@ app.get('/api/admin/lecturers', authSchoolAdmin, asyncRoute(async (req, res) => 
     ]
   );
   return res.json(lecturers);
+}));
+
+app.get('/api/admin/coordinators', authSchoolAdmin, asyncRoute(async (req, res) => {
+  const [coordinators] = await pool.query(
+    `SELECT id, email, school
+     FROM admins
+     WHERE role = 'COORDINATOR'${isSuperAdmin(req) ? '' : ' AND school = ?'}
+     ORDER BY school, email`,
+    isSuperAdmin(req) ? [] : [req.user.school]
+  );
+  return res.json(coordinators);
 }));
 
 app.post('/api/admin/lecturers', authSchoolAdmin, asyncRoute(async (req, res) => {
@@ -1492,16 +1944,21 @@ app.get('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res) 
     return res.status(400).json({ error: 'Search must be a single text value' });
   }
   if (search.length > 100) return res.status(400).json({ error: 'Search must be 100 characters or fewer' });
-  const scopeFilter = adminSchoolFilter(req, 'school');
+  const scopeFilter = adminSchoolFilter(req, 'cu.school');
   const searchFilter = search
-    ? `WHERE (code LIKE ? OR name LIKE ?)${scopeFilter.sql}`
+    ? `WHERE (cu.code LIKE ? OR cu.name LIKE ?)${scopeFilter.sql}`
     : scopeFilter.sql ? `WHERE ${scopeFilter.sql.trim().replace(/^AND /, '')}` : '';
   const searchPattern = `%${search}%`;
   const [units] = await pool.query(
-    `SELECT id, code, name, school, degree_program AS degreeProgram,
-            academic_level AS academicLevel,
-            year_of_study AS yearOfStudy, semester, lecturer_id AS lecturerId, is_public AS isPublic
-     FROM course_units ${searchFilter} ORDER BY code`,
+    `SELECT cu.id, cu.code, cu.name, cu.school, cu.degree_program AS degreeProgram,
+            cu.academic_level AS academicLevel,
+            cu.year_of_study AS yearOfStudy, cu.semester, cu.lecturer_id AS lecturerId,
+            cu.coordinator_id AS coordinatorId, ca.email AS coordinatorEmail,
+            cu.is_public AS isPublic
+     FROM course_units cu
+     LEFT JOIN admins ca ON ca.id = cu.coordinator_id
+     ${searchFilter}
+     ORDER BY cu.code`,
     [...(search ? [searchPattern, searchPattern] : []), ...scopeFilter.params]
   );
   return res.json(units);
@@ -1618,6 +2075,41 @@ app.put('/api/admin/course-units/:id/lecturer', authSchoolAdmin, asyncRoute(asyn
     `UPDATE class_schedules SET lecturer_id = ? WHERE course_unit_id = ?${isSuperAdmin(req) ? '' : ' AND course_unit_id IN (SELECT id FROM course_units WHERE school = ?)'}`,
     [lecturerId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
   );
+  return res.json({ ok: true });
+}));
+
+app.put('/api/admin/course-units/:id/coordinator', authSchoolAdmin, asyncRoute(async (req, res) => {
+  const courseUnitId = Number(req.params.id);
+  const coordinatorId = req.body.coordinatorId === null || req.body.coordinatorId === ''
+    ? null
+    : Number(req.body.coordinatorId);
+  if (!Number.isInteger(courseUnitId) || courseUnitId < 1 ||
+      (coordinatorId !== null && (!Number.isInteger(coordinatorId) || coordinatorId < 1))) {
+    return res.status(400).json({ error: 'Choose a valid course and Lecture Coordinator' });
+  }
+  if (coordinatorId !== null) {
+    const [coordinators] = await pool.query(
+      `SELECT a.id FROM admins a
+       JOIN course_units cu ON cu.school = a.school
+       WHERE a.id = ? AND cu.id = ? AND a.role = 'COORDINATOR'${isSuperAdmin(req) ? '' : ' AND cu.school = ?'}`,
+      [coordinatorId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+    );
+    if (!coordinators.length) {
+      return res.status(400).json({ error: 'Assign a Lecture Coordinator from the same school as the course' });
+    }
+  }
+  const courseScope = isSuperAdmin(req) ? '' : ' AND school = ?';
+  const [result] = await pool.query(
+    `UPDATE course_units SET coordinator_id = ? WHERE id = ?${courseScope}`,
+    [coordinatorId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+  );
+  if (!result.affectedRows) {
+    const [courses] = await pool.query(
+      `SELECT id FROM course_units WHERE id = ?${courseScope}`,
+      [courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+    );
+    if (!courses.length) return res.status(404).json({ error: 'Course unit not found' });
+  }
   return res.json({ ok: true });
 }));
 

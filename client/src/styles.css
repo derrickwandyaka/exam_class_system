@@ -1835,7 +1835,7 @@ select {
 
 .lecturer-assignment-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(190px, 0.8fr) auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(160px, 0.8fr) auto minmax(160px, 0.8fr) auto;
   align-items: center;
   gap: 10px 14px;
   padding: 12px;
@@ -2811,5 +2811,1144 @@ select {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+.chats-nav-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-unread-badge {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #16835d;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chats-nav-button > .chat-unread-badge {
+  position: absolute;
+  top: -8px;
+  right: -9px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border: 2px solid #fff;
+  background: #dc3545;
+  font-size: 0.65rem;
+}
+
+.chats-nav-button svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.student-chat-workspace {
+  position: fixed;
+  z-index: 1100;
+  inset: 0;
+  display: grid;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  min-width: 0;
+  grid-template-columns: minmax(290px, 360px) minmax(0, 1fr);
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgb(23 32 51 / 8%);
+}
+
+.chat-sidebar {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid #dfe5ec;
+  background: #fff;
+}
+
+.chat-sidebar-header {
+  flex: 0 0 auto;
+  padding: max(15px, env(safe-area-inset-top)) 18px 14px;
+  border-bottom: 1px solid #e8edf2;
+  background: #f7f9fc;
+}
+
+.chat-dashboard-back {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 5px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #43516a;
+  font-size: 0.88rem;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.chat-dashboard-back:hover {
+  background: #eaf0f6;
+  color: var(--primary-blue);
+}
+
+.chat-dashboard-back > span:first-child {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.chat-sidebar-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-sidebar-title h1 {
+  margin: 0;
+}
+
+.chat-sidebar-title > span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.chat-room-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: #b7c2d0 transparent;
+  scrollbar-width: thin;
+}
+
+.chat-room-list::-webkit-scrollbar,
+.student-chat-workspace .chat-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-room-list::-webkit-scrollbar-thumb,
+.student-chat-workspace .chat-messages::-webkit-scrollbar-thumb {
+  border-radius: 99px;
+  background: #b7c2d0;
+}
+
+.chat-room-option.chat-list-item {
+  position: relative;
+  display: grid;
+  width: 100%;
+  min-height: 79px;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 11px;
+  padding: 12px 14px;
+  border: 0;
+  border-bottom: 1px solid #edf0f4;
+  border-radius: 0;
+  background: #fff;
+  box-shadow: none;
+  transform: none;
+}
+
+.chat-room-option.chat-list-item:hover,
+.chat-room-option.chat-list-item.active {
+  border-color: #edf0f4;
+  background: #f0f4f9;
+  box-shadow: none;
+}
+
+.chat-room-option.chat-list-item .chat-room-icon {
+  width: 44px;
+  height: 44px;
+  background: #e8edf4;
+  color: #375379;
+}
+
+.chat-room-option.chat-list-item .chat-room-icon.course {
+  background: #e7efff;
+  color: var(--primary-blue);
+}
+
+.chat-room-option.chat-list-item .chat-room-copy {
+  gap: 4px;
+}
+
+.chat-room-option.chat-list-item .chat-room-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 7px;
+}
+
+.chat-room-option.chat-list-item .chat-room-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #1c2738;
+  font-size: 0.9rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-room-option.chat-list-item .chat-room-copy span {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #68768a;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.chat-room-option.chat-list-item time {
+  align-self: start;
+  padding-top: 3px;
+  color: #758197;
+  font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.chat-list-empty {
+  margin: 0;
+  padding: 22px 18px;
+  color: #68768a;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.chat-conversation {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #e9eef4;
+  background-image: radial-gradient(rgb(30 58 138 / 4%) 0.7px, transparent 0.7px);
+  background-size: 18px 18px;
+}
+
+.chat-conversation-header {
+  z-index: 1;
+  display: flex;
+  min-height: 68px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid #e0e6ed;
+  background: #fff;
+  box-shadow: 0 2px 6px rgb(23 32 51 / 4%);
+}
+
+.chat-conversation-header .chat-room-icon {
+  width: 43px;
+  height: 43px;
+  margin: 0;
+  background: #e8edf4;
+  color: #375379;
+}
+
+.chat-conversation-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.chat-conversation-header strong {
+  overflow: hidden;
+  color: #1c2738;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-conversation-header > div > span {
+  color: #748197;
+  font-size: 0.77rem;
+}
+
+.chat-mobile-back {
+  display: none;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--primary-blue);
+  font-size: 1.5rem;
+  cursor: pointer;
+}
+
+.chat-welcome {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.chat-welcome-icon {
+  display: grid;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff;
+  color: var(--primary-blue);
+  font-size: 2rem;
+  box-shadow: 0 8px 24px rgb(30 58 138 / 10%);
+}
+
+.chat-welcome h2 {
+  margin-bottom: 8px;
+}
+
+.chat-welcome p {
+  max-width: 350px;
+  margin: 0;
+  color: #68768a;
+  line-height: 1.5;
+}
+
+.student-chat-workspace .chat-conversation > .chat-panel-full-page {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-self: stretch;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.student-chat-workspace .chat-heading {
+  display: none;
+}
+
+.student-chat-workspace .chat-messages {
+  min-height: 0;
+  flex: 1 1 auto;
+  gap: 13px;
+  overflow: auto;
+  padding: 22px clamp(14px, 4vw, 56px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  scrollbar-color: #b7c2d0 transparent;
+  scrollbar-width: thin;
+}
+
+.student-chat-workspace .chat-message-row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.student-chat-workspace .chat-message-row.own {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.student-chat-workspace .chat-contact-avatar,
+.student-chat-workspace .chat-message-row > .chat-avatar {
+  width: 27px;
+  height: 27px;
+  margin: 0 0 0 4px;
+}
+
+.student-chat-workspace .chat-message-row.own .chat-avatar {
+  margin-right: 4px;
+  margin-left: 0;
+}
+
+.student-chat-workspace .chat-message {
+  max-width: min(78vw, 620px);
+  padding: 10px 13px 8px;
+  border-color: #e0e5eb;
+  border-radius: 13px 13px 13px 4px;
+  background: #fff;
+  box-shadow: 0 2px 4px rgb(23 32 51 / 6%);
+}
+
+.student-chat-workspace .chat-message-row.own .chat-message {
+  border-color: var(--primary-blue);
+  border-radius: 13px 13px 4px 13px;
+  background: var(--primary-blue);
+  color: #fff;
+}
+
+.student-chat-workspace .chat-message-row.own .message-sender,
+.student-chat-workspace .chat-message-row.own .message-meta {
+  color: #dce7ff;
+}
+
+.student-chat-workspace .broadcast-message {
+  max-width: min(88%, 760px);
+  align-self: center;
+  padding: 13px 16px;
+  border-width: 1px;
+  border-radius: 13px;
+  background: #fff5c2;
+}
+
+.student-chat-workspace .chat-compose {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  padding: 12px 18px max(12px, env(safe-area-inset-bottom));
+  border-top: 1px solid #e0e6ed;
+  background: #f7f9fc;
+}
+
+.student-chat-workspace .chat-compose-row {
+  align-items: center;
+  gap: 10px;
+}
+
+.student-chat-workspace .chat-compose textarea {
+  min-height: 46px;
+  max-height: 120px;
+  resize: none;
+  padding: 12px 15px;
+  border-color: #d5dde7;
+  border-radius: 24px;
+  background: #fff;
+}
+
+.student-chat-workspace .chat-compose .btn {
+  min-width: 82px;
+  min-height: 44px;
+  border-radius: 24px;
+}
+
+.student-chat-workspace .chat-compose-hint {
+  display: none;
+}
+
+@media (max-width: 680px) {
+  .student-chat-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .chat-sidebar,
+  .chat-conversation {
+    grid-area: 1 / 1;
+  }
+
+  .chat-sidebar.conversation-active {
+    display: none;
+  }
+
+  .chat-conversation {
+    display: none;
+  }
+
+  .chat-conversation.active {
+    display: flex;
+    animation: chat-screen-enter 180ms ease-out;
+  }
+
+  .chat-mobile-back {
+    display: block;
+  }
+
+  .chat-sidebar-header {
+    padding-right: 15px;
+    padding-left: 15px;
+  }
+
+  .chat-room-option.chat-list-item {
+    min-height: 76px;
+    padding-right: 12px;
+    padding-left: 14px;
+  }
+
+  .student-chat-workspace .chat-messages {
+    padding: 15px 12px;
+  }
+
+  .student-chat-workspace .chat-message {
+    max-width: min(84vw, 620px);
+  }
+
+  .student-chat-workspace .chat-compose {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+}
+
+@keyframes chat-screen-enter {
+  from { opacity: 0.7; transform: translateX(24px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+:root[data-theme="teal"] {
+  --primary-blue: #0f766e;
+  --primary-blue-hover: #115e59;
+  --primary-blue-light: #e6f5f3;
+  --shadow-card: 0 14px 36px rgb(15 118 110 / 10%), 0 3px 10px rgb(23 32 51 / 5%);
+}
+
+:root[data-theme="purple"] {
+  --primary-blue: #6d28d9;
+  --primary-blue-hover: #5b21b6;
+  --primary-blue-light: #f0eafe;
+  --shadow-card: 0 14px 36px rgb(109 40 217 / 10%), 0 3px 10px rgb(23 32 51 / 5%);
+}
+
+:root[data-theme="rose"] {
+  --primary-blue: #be123c;
+  --primary-blue-hover: #9f1239;
+  --primary-blue-light: #fff0f3;
+  --shadow-card: 0 14px 36px rgb(190 18 60 / 10%), 0 3px 10px rgb(23 32 51 / 5%);
+}
+
+.student-menu-anchor {
+  position: relative;
+}
+
+.student-menu-toggle {
+  display: inline-flex;
+  min-width: 62px;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 8px 2px 2px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: #43516a;
+  cursor: pointer;
+}
+
+.student-menu-toggle:hover,
+.student-menu-toggle[aria-expanded="true"] {
+  border-color: var(--line);
+  background: #fff;
+}
+
+.student-menu-toggle .topbar-avatar {
+  width: 40px;
+  height: 40px;
+}
+
+.student-menu-dots {
+  display: inline-grid;
+  min-width: 18px;
+  min-height: 36px;
+  flex: 0 0 auto;
+  place-items: center;
+  font-size: 1.5rem;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.student-menu-popover {
+  position: absolute;
+  z-index: 1200;
+  top: calc(100% + 9px);
+  right: 0;
+  width: min(320px, calc(100vw - 28px));
+  max-height: min(78vh, 560px);
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 16px 42px rgb(23 32 51 / 18%);
+  scrollbar-width: thin;
+}
+
+.student-menu-identity {
+  display: grid;
+  gap: 3px;
+  padding: 11px 12px 13px;
+  border-bottom: 1px solid #edf0f4;
+}
+
+.student-menu-identity strong {
+  overflow: hidden;
+  color: #1c2738;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-menu-identity span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.student-menu-theme {
+  display: flex;
+  min-height: 53px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 11px;
+}
+
+.student-menu-section-label {
+  color: #43516a;
+  font-size: 0.82rem;
+  font-weight: 680;
+}
+
+.theme-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-option {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 3px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  cursor: pointer;
+}
+
+.theme-option > span {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--theme-swatch);
+}
+
+.theme-option.selected {
+  border-color: var(--theme-swatch);
+}
+
+.student-menu-file-input {
+  display: none;
+}
+
+.student-menu-item {
+  display: flex;
+  width: 100%;
+  min-height: 43px;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #263650;
+  font: inherit;
+  font-size: 0.87rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.student-menu-item:hover:not(:disabled) {
+  background: var(--primary-blue-light);
+  color: var(--primary-blue);
+}
+
+.student-menu-item:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.student-menu-item > span:first-child {
+  display: inline-grid;
+  width: 21px;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--primary-blue);
+  font-size: 1.05rem;
+}
+
+.student-menu-divider {
+  height: 1px;
+  margin: 5px 4px;
+  background: #edf0f4;
+}
+
+.student-menu-item.logout {
+  color: var(--danger-red-dark);
+}
+
+.student-menu-item.logout > span:first-child {
+  color: var(--danger-red-dark);
+}
+
+@media (max-width: 480px) {
+  .student-menu-toggle {
+    min-width: 58px;
+    min-height: 42px;
+    gap: 8px;
+  }
+
+  .student-menu-toggle .topbar-avatar {
+    width: 36px;
+    height: 36px;
+  }
+
+  .student-menu-popover {
+    position: fixed;
+    top: max(66px, calc(env(safe-area-inset-top) + 60px));
+    right: 12px;
+  }
+}
+
+.attendance-marked-badge {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid #9ed5b0;
+  border-radius: 999px;
+  background: #e8f7ed;
+  color: #17643a;
+  font-size: 0.75rem;
+  font-weight: 760;
+}
+
+.attendance-marked-badge.absent {
+  border-color: #efb3b3;
+  background: #fff1f1;
+  color: #a32121;
+}
+
+.attendance-marked-badge.late {
+  border-color: #f0d48b;
+  background: #fff8df;
+  color: #785600;
+}
+
+.check-in-button {
+  width: fit-content;
+  margin-top: 5px;
+}
+
+.check-in-modal input {
+  width: 100%;
+  min-height: 52px;
+  padding: 10px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  font-size: 1.25rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.28em;
+  text-align: center;
+}
+
+.coordinator-page {
+  width: min(100% - 36px, 1040px);
+}
+
+.coordinator-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 28px 0 20px;
+}
+
+.coordinator-heading h1 {
+  margin: 5px 0;
+}
+
+.coordinator-heading p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.coordinator-lecture-list {
+  display: grid;
+  gap: 14px;
+}
+
+.coordinator-lecture-card {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.2fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  padding: 20px;
+}
+
+.coordinator-lecture-time {
+  display: grid;
+  gap: 4px;
+  padding-right: 17px;
+  border-right: 1px solid var(--line);
+  color: var(--primary-blue);
+  font-variant-numeric: tabular-nums;
+}
+
+.coordinator-lecture-time strong {
+  font-size: 1.1rem;
+}
+
+.coordinator-lecture-time span {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.coordinator-lecture-details {
+  min-width: 0;
+}
+
+.coordinator-lecture-details h2 {
+  margin-bottom: 8px;
+}
+
+.coordinator-lecture-details p {
+  margin: 4px 0;
+  color: #43516a;
+  font-size: 0.87rem;
+}
+
+.coordinator-lecture-details p.muted {
+  color: var(--muted);
+}
+
+.coordinator-lecture-actions {
+  display: grid;
+  min-width: 170px;
+  gap: 8px;
+}
+
+.lecturer-reminders {
+  display: grid;
+  gap: 10px;
+  margin: 18px 0;
+  padding: 18px;
+  border-left: 4px solid var(--primary-blue);
+}
+
+.lecturer-reminders h2 {
+  margin: 0;
+}
+
+.lecturer-reminder {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f8faff;
+}
+
+.lecturer-reminder p {
+  margin: 5px 0;
+  color: #43516a;
+}
+
+.lecturer-reminder time {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.lecturer-reminder .btn {
+  flex: 0 0 auto;
+}
+
+.coordinator-modal-backdrop {
+  z-index: 1200;
+}
+
+.coordinator-attendance-modal {
+  display: flex;
+  width: min(100%, 680px);
+  max-height: min(92vh, 900px);
+  flex-direction: column;
+  padding: 22px;
+  border-top: 5px solid var(--primary-blue);
+  overflow: hidden;
+}
+
+.coordinator-modal-heading {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.coordinator-modal-heading .eyebrow {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.coordinator-modal-heading h2 {
+  margin-top: 5px;
+}
+
+.modal-close-button {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: #43516a;
+  font-size: 1.55rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.checkin-code-section {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 3px 0 17px;
+  padding: 17px;
+  border: 1px solid #d5deed;
+  border-radius: 13px;
+  background: #f5f8ff;
+  text-align: center;
+}
+
+.checkin-code {
+  display: block;
+  width: min(100%, 330px);
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: var(--primary-blue);
+  color: #fff;
+  font-size: 48px;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.17em;
+  line-height: 1.25;
+  text-align: center;
+  text-indent: 0.17em;
+}
+
+.checkin-code-section p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.coordinator-roster-heading {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 8px;
+}
+
+.coordinator-roster-heading h3 {
+  margin: 0;
+  color: var(--primary-blue);
+  font-size: 0.96rem;
+}
+
+.coordinator-roster-heading h3 span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.live-attendance-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #52705c;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.live-attendance-label i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #24a05a;
+  box-shadow: 0 0 0 3px rgb(36 160 90 / 13%);
+}
+
+.coordinator-roster {
+  min-height: 70px;
+  flex: 1 1 auto;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  overscroll-behavior: contain;
+}
+
+.coordinator-roster-row {
+  display: flex;
+  min-height: 61px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #edf0f4;
+  transition: background-color 140ms ease;
+}
+
+.coordinator-roster-row.present {
+  background: #effaf2;
+}
+
+.coordinator-student-name {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.coordinator-student-name strong {
+  overflow: hidden;
+  color: #2b3545;
+  font-size: 0.87rem;
+  text-overflow: ellipsis;
+}
+
+.coordinator-roster-row.present .coordinator-student-name strong {
+  color: #17643a;
+}
+
+.coordinator-student-name small {
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.coordinator-roster-row select {
+  width: auto;
+  min-width: 112px;
+  min-height: 37px;
+  padding: 6px 26px 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #344054;
+  font-size: 0.8rem;
+}
+
+.coordinator-roster-row.present select {
+  border-color: #9ed5b0;
+  color: #17643a;
+  font-weight: 720;
+}
+
+.coordinator-modal-actions {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+@media (max-width: 680px) {
+  .coordinator-page {
+    width: min(100% - 24px, 560px);
+    padding-top: 18px;
+  }
+
+  .coordinator-heading {
+    margin: 22px 0 15px;
+  }
+
+  .coordinator-lecture-card {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .coordinator-lecture-time {
+    padding-right: 10px;
+  }
+
+  .coordinator-lecture-time strong {
+    font-size: 0.98rem;
+  }
+
+  .coordinator-lecture-actions {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    min-width: 0;
+  }
+
+  .lecturer-reminder {
+    flex-direction: column;
+  }
+
+  .coordinator-attendance-modal {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+    padding: 17px 14px;
+  }
+
+  .checkin-code {
+    font-size: 48px;
+  }
+}
+
+@media (max-width: 420px) {
+  .coordinator-lecture-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .coordinator-lecture-time {
+    grid-template-columns: auto auto;
+    justify-content: start;
+    gap: 8px;
+    padding: 0;
+    border: 0;
+  }
+
+  .coordinator-roster-row {
+    padding-right: 3px;
+    padding-left: 3px;
+  }
+
+  .coordinator-roster-row select {
+    min-width: 100px;
+  }
+
+  .coordinator-modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .coordinator-modal-actions .btn {
+    width: 100%;
   }
 }

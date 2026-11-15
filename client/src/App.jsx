@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, clearSession, getToken, setSession } from './api';
 import ChatPanel from './ChatPanel';
 import { useToast } from './Toast';
@@ -8,6 +8,12 @@ const SCHOOLS = ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other'];
 const ACADEMIC_LEVELS = ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD'];
 const PROGRAM_MODES = ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE'];
 const WEEK_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const APP_THEMES = [
+  { id: 'blue', label: 'Ocean blue', color: '#1e3a8a' },
+  { id: 'teal', label: 'Fresh teal', color: '#0f766e' },
+  { id: 'purple', label: 'Royal purple', color: '#6d28d9' },
+  { id: 'rose', label: 'Warm rose', color: '#be123c' }
+];
 const DEGREE_PROGRAMS = [
   // School of Computing (SCI)
   'BCS', 'BIST', 'DIST', 'BCDF', 'DCS', 'DIT', 'MIST', 'SCIAD',
@@ -146,6 +152,28 @@ function formatTime(value) {
   return value.slice(0, 5);
 }
 
+function isClassOngoing(classSession) {
+  if (!classSession?.startTime || !classSession?.endTime) return false;
+  const toMinutes = (value) => {
+    const [hours, minutes] = value.split(':').map(Number);
+    return hours * 60 + minutes;
+  };
+  const now = new Date();
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  return currentMinutes >= toMinutes(classSession.startTime) &&
+    currentMinutes <= toMinutes(classSession.endTime);
+}
+
+function formatChatPreviewTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return new Intl.DateTimeFormat(undefined, sameDay
+    ? { hour: 'numeric', minute: '2-digit' }
+    : { weekday: 'short' }).format(date);
+}
+
 async function downloadNote(note) {
   const token = getToken();
   const response = await fetch(`/api/notes/${note.id}/download`, {
@@ -274,6 +302,7 @@ export default function App() {
 
   if (role === 'SUPER_ADMIN') return <SuperAdminApp onLogout={logout} />;
   if (role === 'SCHOOL_ADMIN') return <AdminApp onLogout={logout} />;
+  if (role === 'COORDINATOR') return <CoordinatorApp onLogout={logout} />;
   if (role === 'student') return <StudentApp onLogout={logout} />;
   if (role === 'lecturer') return <LecturerApp onLogout={logout} />;
   return <AuthScreen onAuth={setRole} />;
@@ -335,7 +364,7 @@ function AuthScreen({ onAuth }) {
         body: JSON.stringify(body)
       });
       const authenticatedRole = sessionRole || result.role;
-      if (!result.token || !['SUPER_ADMIN', 'SCHOOL_ADMIN', 'student', 'lecturer'].includes(authenticatedRole)) {
+      if (!result.token || !['SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'student', 'lecturer'].includes(authenticatedRole)) {
         throw new Error('Sign-in response was invalid. Please try again.');
       }
       setSession(result.token, authenticatedRole);
@@ -361,7 +390,7 @@ function AuthScreen({ onAuth }) {
 
         {tab === 'login' && (
           <form className="form" onSubmit={(event) => submit(event, '/sign-in', login, null)}>
-            <p className="muted small">Students, lecturers, and administrators can sign in here.</p>
+            <p className="muted small">Students, lecturers, coordinators, and administrators can sign in here.</p>
             <label>Email
               <input type="email" autoComplete="email" required value={login.email}
                 onChange={(event) => setLogin({ ...login, email: event.target.value })} />
@@ -492,6 +521,18 @@ function StudentApp({ onLogout }) {
   const [tab, setTab] = useState('exams');
   const [courseChatId, setCourseChatId] = useState('');
   const [chatPageOpen, setChatPageOpen] = useState(false);
+  const [chatSelected, setChatSelected] = useState(false);
+  const [chatPreviews, setChatPreviews] = useState({});
+  const [chatUnreadCounts, setChatUnreadCounts] = useState({});
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [checkinClass, setCheckinClass] = useState(null);
+  const [checkinCode, setCheckinCode] = useState('');
+  const [checkingIn, setCheckingIn] = useState(false);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [appTheme, setAppTheme] = useState(() => {
+    const savedTheme = localStorage.getItem('appTheme');
+    return APP_THEMES.some((theme) => theme.id === savedTheme) ? savedTheme : 'blue';
+  });
   const [examSearch, setExamSearch] = useState('');
   const [classSearch, setClassSearch] = useState('');
   const [loading, setLoading] = useState(true);
@@ -505,6 +546,51 @@ function StudentApp({ onLogout }) {
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const notify = useToast();
   const pushNotifications = usePushNotifications(notify);
+  const unreadErrorShown = useRef(false);
+  const profileMenuRef = useRef(null);
+  const profilePictureInputRef = useRef(null);
+  const classRoomSnapshot = useRef(null);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = appTheme;
+    localStorage.setItem('appTheme', appTheme);
+  }, [appTheme]);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return undefined;
+    function closeMenu(event) {
+      if (event.type === 'keydown' && event.key !== 'Escape') return;
+      if (event.type === 'pointerdown' && profileMenuRef.current?.contains(event.target)) return;
+      setProfileMenuOpen(false);
+    }
+
+    document.addEventListener('pointerdown', closeMenu);
+    document.addEventListener('keydown', closeMenu);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenu);
+      document.removeEventListener('keydown', closeMenu);
+    };
+  }, [profileMenuOpen]);
+
+  const refreshChatUnread = useCallback(async () => {
+    try {
+      const result = await api('/chat/unread');
+      setChatUnreadCounts(result.rooms || {});
+      setUnreadCount(Number(result.total) || 0);
+      unreadErrorShown.current = false;
+    } catch (error) {
+      if (!unreadErrorShown.current) {
+        notify(error.message || 'Could not load unread chat counts.', 'error');
+        unreadErrorShown.current = true;
+      }
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    refreshChatUnread();
+    const timer = window.setInterval(refreshChatUnread, 15000);
+    return () => window.clearInterval(timer);
+  }, [refreshChatUnread]);
 
   async function load() {
     setLoading(true);
@@ -521,6 +607,9 @@ function StudentApp({ onLogout }) {
       setCourseUnitResults(matchingUnits);
       setExams(scheduledExams);
       setClasses(classSchedule);
+      classRoomSnapshot.current = Object.fromEntries(classSchedule
+        .filter((classSession) => classSession.id)
+        .map((classSession) => [classSession.id, classSession.room]));
     } catch (requestError) {
       if (requestError.message === 'Invalid session' || requestError.message === 'Not logged in') {
         onLogout();
@@ -545,22 +634,35 @@ function StudentApp({ onLogout }) {
   }, [debouncedExamSearch, notify]);
 
   useEffect(() => {
-    if (tab !== 'classes') return undefined;
+    if (!student) return undefined;
     let active = true;
     const refreshClasses = async () => {
       try {
         const result = await api('/classes');
-        if (active) setClasses(result);
+        if (!active) return;
+        const nextRooms = Object.fromEntries(result
+          .filter((classSession) => classSession.id)
+          .map((classSession) => [classSession.id, classSession.room]));
+        if (classRoomSnapshot.current) {
+          result.forEach((classSession) => {
+            const previousRoom = classRoomSnapshot.current[classSession.id];
+            if (previousRoom && classSession.room && previousRoom !== classSession.room) {
+              notify(`${classSession.code} room changed: ${previousRoom} → ${classSession.room}`);
+            }
+          });
+        }
+        classRoomSnapshot.current = nextRooms;
+        setClasses(result);
       } catch (error) {
         if (active) notify(error.message || 'Could not refresh your lecture schedule.', 'error');
       }
     };
-    const timer = window.setInterval(refreshClasses, 30000);
+    const timer = window.setInterval(refreshClasses, 15000);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [tab, notify]);
+  }, [student?.id, notify]);
 
   useEffect(() => {
     let active = true;
@@ -607,6 +709,32 @@ function StudentApp({ onLogout }) {
       notify(requestError.message || 'Could not update exam status. Please try again.', 'error');
     } finally {
       setBusyRegistrationId(null);
+    }
+  }
+
+  async function checkInToClass() {
+    if (!checkinClass || checkingIn) return;
+    setCheckingIn(true);
+    try {
+      await api('/student/check-in', {
+        method: 'POST',
+        body: JSON.stringify({
+          scheduleId: checkinClass.id,
+          sessionCode: checkinCode.trim()
+        })
+      });
+      setClasses((current) => current.map((classSession) =>
+        classSession.id === checkinClass.id
+          ? { ...classSession, attendanceStatus: 'PRESENT' }
+          : classSession
+      ));
+      setCheckinClass(null);
+      setCheckinCode('');
+      notify('Attendance marked present.');
+    } catch (error) {
+      notify(error.message || 'Could not check in to this class.', 'error');
+    } finally {
+      setCheckingIn(false);
     }
   }
 
@@ -661,6 +789,48 @@ function StudentApp({ onLogout }) {
       setDeletingAccount(false);
     }
   }
+
+  const matchingCourseChats = student
+    ? units.filter((unit) => unit.registered)
+    : [];
+  const chatCourseIds = matchingCourseChats.map((unit) => unit.id).join(',');
+
+  useEffect(() => {
+    if (!chatPageOpen || !student) return undefined;
+    let active = true;
+
+    async function refreshPreviews() {
+      const rooms = [
+        { id: 'general', endpoint: '/messages' },
+        ...matchingCourseChats.map((unit) => ({
+          id: `course-${unit.id}`,
+          endpoint: `/messages?course_unit_id=${encodeURIComponent(unit.id)}`
+        }))
+      ];
+      const results = await Promise.allSettled(rooms.map((room) => api(room.endpoint)));
+      if (!active) return;
+
+      const previews = {};
+      let failed = false;
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          const messages = result.value;
+          previews[rooms[index].id] = messages.length ? messages[messages.length - 1] : null;
+        } else {
+          failed = true;
+        }
+      });
+      setChatPreviews(previews);
+      if (failed) notify('Some chat previews could not be loaded.', 'error');
+    }
+
+    refreshPreviews();
+    const timer = window.setInterval(refreshPreviews, 30000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [chatPageOpen, student?.id, chatCourseIds, notify]);
 
   if (loading && !student) {
     return <main className="page"><div className="loading-state"><span className="spinner" /> Loading your timetable…</div></main>;
@@ -718,16 +888,6 @@ function StudentApp({ onLogout }) {
   const unscheduledClasses = visibleClasses.filter((classSession) => !classSession.dayOfWeek);
   const normalizedUnitSearch = unitSearch.trim();
   const visibleUnits = courseUnitResults;
-  const matchingCourseChats = student
-    ? units.filter((unit) => unit.registered || (
-        unit.isPublic || (
-          unit.school === student.school &&
-          (unit.degreeProgram === student.degreeProgram || unit.degreeProgram === 'ALL') &&
-          Number(unit.yearOfStudy) === Number(student.yearOfStudy) &&
-          Number(unit.semester) === Number(student.semester)
-        )
-      ))
-    : [];
   const selectedChatCourse = matchingCourseChats.find((unit) => String(unit.id) === courseChatId);
 
   return (
@@ -740,12 +900,85 @@ function StudentApp({ onLogout }) {
           </div>}
         </div>
         <div className="topbar-actions">
-          <Avatar
-            src={student.profilePicture}
-            name={`${student.firstName} ${student.lastName}`}
-            className="topbar-avatar"
-          />
-          <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
+          <button type="button" className="btn ghost chats-nav-button"
+            onClick={() => {
+              setTab('exams');
+              setCourseChatId('');
+              setChatSelected(false);
+              setChatPageOpen(true);
+            }}>
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 2v-5.5A7.5 7.5 0 0 1 4.5 5h8A7.5 7.5 0 0 1 20 11.5Z" />
+              <path d="M8 11h.01M12 11h.01M16 11h.01" />
+            </svg>
+            Chats
+            {unreadCount > 0 && (
+              <span className="chat-unread-badge" aria-label={`${unreadCount} unread messages`}>
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
+          <div className="student-menu-anchor" ref={profileMenuRef}>
+            <button type="button" className="student-menu-toggle"
+              aria-label="Open profile and settings menu"
+              aria-haspopup="menu" aria-expanded={profileMenuOpen}
+              onClick={() => setProfileMenuOpen((open) => !open)}>
+              <Avatar
+                src={student.profilePicture}
+                name={`${student.firstName} ${student.lastName}`}
+                className="topbar-avatar"
+              />
+              <span className="student-menu-dots" aria-hidden="true">⋮</span>
+            </button>
+            {profileMenuOpen && (
+              <div className="student-menu-popover" role="menu" aria-label="Profile and settings">
+                <div className="student-menu-identity">
+                  <strong>{student.firstName} {student.lastName}</strong>
+                  <span>{student.studentNumber}</span>
+                </div>
+                <div className="student-menu-theme">
+                  <span className="student-menu-section-label">App colour theme</span>
+                  <div className="theme-options" role="group" aria-label="Choose app colour theme">
+                    {APP_THEMES.map((theme) => (
+                      <button type="button" key={theme.id}
+                        className={`theme-option${appTheme === theme.id ? ' selected' : ''}`}
+                        style={{ '--theme-swatch': theme.color }}
+                        aria-label={theme.label}
+                        aria-pressed={appTheme === theme.id}
+                        onClick={() => setAppTheme(theme.id)}>
+                        <span />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <input ref={profilePictureInputRef} className="student-menu-file-input"
+                  type="file" accept="image/*" onChange={uploadProfilePicture}
+                  disabled={uploadingPicture} aria-label="Upload profile photo" />
+                <button type="button" className="student-menu-item" role="menuitem"
+                  disabled={uploadingPicture}
+                  onClick={() => profilePictureInputRef.current?.click()}>
+                  <span aria-hidden="true">▧</span>
+                  {uploadingPicture ? 'Uploading photo…' : 'Upload profile photo'}
+                </button>
+                <button type="button" className="student-menu-item" role="menuitem"
+                  onClick={() => { setTab('units'); setProfileMenuOpen(false); }}>
+                  <span aria-hidden="true">＋</span>
+                  Register for courses
+                </button>
+                <button type="button" className="student-menu-item" role="menuitem"
+                  onClick={() => { setTab('profile'); setProfileMenuOpen(false); }}>
+                  <span aria-hidden="true">⚙</span>
+                  Settings
+                </button>
+                <div className="student-menu-divider" />
+                <button type="button" className="student-menu-item logout"
+                  role="menuitem" onClick={onLogout}>
+                  <span aria-hidden="true">↪</span>
+                  Log out
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -778,6 +1011,21 @@ function StudentApp({ onLogout }) {
                   <strong>{item.type === 'exam' ? `${item.code} — ${item.courseName}` : item.courseName}</strong>
                   <span>{item.type === 'exam' ? `Room/Hall: ${item.room}` : `Lecture · ${item.room}`}</span>
                   {item.lecturerName && <b>Lecturer: {item.lecturerName}</b>}
+                  {item.type === 'lecture' && item.attendanceStatus && (
+                    <span className={`attendance-marked-badge ${item.attendanceStatus.toLowerCase()}`}>
+                      {item.attendanceStatus === 'PRESENT'
+                        ? 'Attendance marked · Present'
+                        : item.attendanceStatus === 'LATE'
+                          ? 'Attendance marked · Late'
+                          : 'Marked absent'}
+                    </span>
+                  )}
+                  {item.type === 'lecture' && !item.attendanceStatus && isClassOngoing(item) && (
+                    <button type="button" className="btn primary small check-in-button"
+                      onClick={() => { setCheckinClass(item); setCheckinCode(''); }}>
+                      Check-in to Class
+                    </button>
+                  )}
                 </div>
               </article>
             ))}
@@ -788,77 +1036,109 @@ function StudentApp({ onLogout }) {
       <div className="tabs" role="tablist" aria-label="Student timetable">
         <button type="button" className={tab === 'exams' ? 'tab active' : 'tab'} onClick={() => setTab('exams')}>My exams</button>
         <button type="button" className={tab === 'classes' ? 'tab active' : 'tab'} onClick={() => setTab('classes')}>My Lectures</button>
-        <button type="button" className={tab === 'units' ? 'tab active' : 'tab'} onClick={() => setTab('units')}>
-          Course units ({units.filter((unit) => unit.registered).length})
-        </button>
-        <button type="button" className={tab === 'chat' ? 'tab active' : 'tab'} onClick={() => setTab('chat')}>Chat &amp; Updates</button>
-        <button type="button" className={tab === 'profile' ? 'tab active' : 'tab'} onClick={() => setTab('profile')}>Profile</button>
       </div>
 
       {loading && <div className="inline-loading"><span className="spinner" /> Updating your timetable…</div>}
 
-      {tab === 'chat' && (
-        chatPageOpen ? (
-          <section className={`student-chat-page chat-screen-overlay${courseChatId ? ' course-chat-screen' : ''}`}>
-            <button type="button" className="btn ghost chat-back-button"
-              onClick={() => setChatPageOpen(false)}>
-              <span aria-hidden="true">←</span> All chats
-            </button>
-            {courseChatId ? (
-              selectedChatCourse ? (
-                <>
-                  <header className="chat-page-title">
-                    <span className="eyebrow">Course discussion</span>
-                    <h1>{selectedChatCourse.code} — {selectedChatCourse.name}</h1>
-                    <p className="muted">Messages for students and the lecturer assigned to this course.</p>
-                  </header>
-                  <NotesList key={selectedChatCourse.id} courseUnitId={selectedChatCourse.id} />
-                  <ChatPanel key={`student-class-${selectedChatCourse.id}`} student={student}
-                    courseUnit={selectedChatCourse} fullPage />
-                </>
-              ) : <p className="muted">This course chat is not available for your current course details.</p>
+      {chatPageOpen && (
+        <section className="student-chat-workspace" aria-label="Chats">
+          <aside className={`chat-sidebar${chatSelected ? ' conversation-active' : ''}`}>
+            <header className="chat-sidebar-header">
+              <button type="button" className="chat-dashboard-back"
+                onClick={() => setChatPageOpen(false)} aria-label="Back to dashboard">
+                <span aria-hidden="true">←</span>
+                <span>Dashboard</span>
+              </button>
+              <div className="chat-sidebar-title">
+                <h1>Chats</h1>
+                <span>{matchingCourseChats.length + 1} conversations</span>
+              </div>
+            </header>
+            <div className="chat-room-list">
+              <button type="button"
+                className={`chat-room-option chat-list-item${chatSelected && !courseChatId ? ' active' : ''}`}
+                onClick={() => { setCourseChatId(''); setChatSelected(true); }}>
+                <span className="chat-room-icon" aria-hidden="true">G</span>
+                <span className="chat-room-copy">
+                  <span className="chat-room-title">
+                    <strong>General {student.school} Chat</strong>
+                    {chatUnreadCounts.general > 0 && (
+                      <span className="chat-unread-badge">{chatUnreadCounts.general}</span>
+                    )}
+                  </span>
+                  <span>{chatPreviews.general?.text || 'Your school group and university updates'}</span>
+                </span>
+                <time>{formatChatPreviewTime(chatPreviews.general?.createdAt)}</time>
+              </button>
+              {matchingCourseChats.map((unit) => {
+                const preview = chatPreviews[`course-${unit.id}`];
+                return (
+                  <button type="button"
+                    className={`chat-room-option chat-list-item${chatSelected && courseChatId === String(unit.id) ? ' active' : ''}`}
+                    key={unit.id}
+                    onClick={() => { setCourseChatId(String(unit.id)); setChatSelected(true); }}>
+                    <span className="chat-room-icon course" aria-hidden="true">C</span>
+                    <span className="chat-room-copy">
+                      <span className="chat-room-title">
+                        <strong>{unit.code} — {unit.name}</strong>
+                        {chatUnreadCounts[`course-${unit.id}`] > 0 && (
+                          <span className="chat-unread-badge">
+                            {chatUnreadCounts[`course-${unit.id}`]}
+                          </span>
+                        )}
+                      </span>
+                      <span>{preview?.isBroadcast ? '📣 ' : ''}{preview?.text || 'Class chat · Start a conversation'}</span>
+                    </span>
+                    <time>{formatChatPreviewTime(preview?.createdAt)}</time>
+                  </button>
+                );
+              })}
+              {!matchingCourseChats.length && (
+                <p className="chat-list-empty">Course chats appear here when you register for course units.</p>
+              )}
+            </div>
+          </aside>
+          <div className={`chat-conversation${chatSelected ? ' active' : ''}`}>
+            {!chatSelected ? (
+              <div className="chat-welcome">
+                <span className="chat-welcome-icon" aria-hidden="true">✉</span>
+                <h2>Welcome to your chats</h2>
+                <p>Select a conversation to start messaging with your school or course groups.</p>
+              </div>
             ) : (
               <>
-                <header className="chat-page-title">
-                  <span className="eyebrow">Student group</span>
-                  <h1>General Degree Chat</h1>
-                  <p className="muted">Messages for your student group and global updates.</p>
+                <header className="chat-conversation-header">
+                  <button type="button" className="chat-mobile-back"
+                    onClick={() => setChatSelected(false)} aria-label="Back to chat list">
+                    ←
+                  </button>
+                  <span className={`chat-room-icon${courseChatId ? ' course' : ''}`} aria-hidden="true">
+                    {courseChatId ? 'C' : 'G'}
+                  </span>
+                  <div>
+                    <strong>{selectedChatCourse
+                      ? `${selectedChatCourse.code} — ${selectedChatCourse.name}`
+                      : `General ${student.school} Chat`}</strong>
+                    <span>{selectedChatCourse
+                      ? 'Course discussion'
+                      : `${student.school} · ${student.degreeProgram} · Year ${student.yearOfStudy}`}</span>
+                  </div>
                 </header>
-                <ChatPanel key="student-general-chat" student={student} fullPage />
+                {courseChatId && !selectedChatCourse ? (
+                  <p className="chat-list-empty">This course chat is not available for your registered courses.</p>
+                ) : (
+                  <ChatPanel
+                    key={courseChatId ? `student-class-${courseChatId}` : 'student-general-chat'}
+                    student={student}
+                    courseUnit={selectedChatCourse}
+                    onRead={refreshChatUnread}
+                    fullPage
+                  />
+                )}
               </>
             )}
-          </section>
-        ) : (
-          <section className="student-chat-section">
-            <header className="chat-list-heading">
-              <h1>Chats</h1>
-              <p className="muted">Choose a conversation to open it in a focused reading view.</p>
-            </header>
-            <button type="button" className="chat-room-option"
-              onClick={() => { setCourseChatId(''); setChatPageOpen(true); }}>
-              <span className="chat-room-icon" aria-hidden="true">G</span>
-              <span className="chat-room-copy">
-                <strong>General Degree Chat</strong>
-                <span>Your student group and global updates</span>
-              </span>
-              <span className="chat-room-arrow" aria-hidden="true">›</span>
-            </button>
-            {matchingCourseChats.map((unit) => (
-              <button type="button" className="chat-room-option" key={unit.id}
-                onClick={() => { setCourseChatId(String(unit.id)); setChatPageOpen(true); }}>
-                <span className="chat-room-icon course" aria-hidden="true">C</span>
-                <span className="chat-room-copy">
-                  <strong>{unit.code} — {unit.name}</strong>
-                  <span>Class chat · Year {unit.yearOfStudy}, Semester {unit.semester}</span>
-                </span>
-                <span className="chat-room-arrow" aria-hidden="true">›</span>
-              </button>
-            ))}
-            {!matchingCourseChats.length && (
-              <p className="muted">No course chats match your current school, degree, year, and semester.</p>
-            )}
-          </section>
-        )
+          </div>
+        </section>
       )}
 
       {tab === 'classes' && (
@@ -1020,28 +1300,6 @@ function StudentApp({ onLogout }) {
               </button>
             )}
           </section>
-          <div className="profile-picture-setting">
-            <Avatar
-              src={student.profilePicture}
-              name={`${student.firstName} ${student.lastName}`}
-              className="profile-avatar"
-            />
-            <div>
-              <strong>{student.firstName} {student.lastName}</strong>
-              <p className="muted small">Choose a profile picture to show next to your chat messages.</p>
-              <label className={`btn upload-picture-btn${uploadingPicture ? ' disabled' : ''}`}>
-                {uploadingPicture ? <><span className="spinner" /> Uploading…</> : 'Upload New Photo'}
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={uploadProfilePicture}
-                  disabled={uploadingPicture}
-                  aria-label="Upload new profile picture"
-                />
-              </label>
-            </div>
-          </div>
-
           <div className="danger-zone">
             <h3>Delete account</h3>
             <p className="muted small">Permanently remove your account and your course registrations.</p>
@@ -1076,6 +1334,33 @@ function StudentApp({ onLogout }) {
               </button>
             </div>
           </section>
+        </div>
+      )}
+      {checkinClass && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="modal check-in-modal" role="dialog" aria-modal="true"
+            aria-labelledby="check-in-title" onSubmit={(event) => {
+              event.preventDefault();
+              checkInToClass();
+            }}>
+            <h2 id="check-in-title">Check-in to {checkinClass.code}</h2>
+            <p>Enter the four-digit code shown by your Lecture Coordinator.</p>
+            <label>Session code
+              <input autoFocus inputMode="numeric" pattern="[0-9]{4}" maxLength={4}
+                value={checkinCode} onChange={(event) =>
+                  setCheckinCode(event.target.value.replace(/\D/g, '').slice(0, 4))}
+                placeholder="0000" required aria-label="Four-digit attendance code" />
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost"
+                onClick={() => { setCheckinClass(null); setCheckinCode(''); }}
+                disabled={checkingIn}>Cancel</button>
+              <button type="submit" className="btn primary"
+                disabled={checkingIn || checkinCode.length !== 4}>
+                {checkingIn ? 'Checking in…' : 'Submit code'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </main>
@@ -1144,6 +1429,7 @@ function ExamSessionCard({ session, onDelete, busyExamId, onComplete, busyRegist
 function LecturerApp({ onLogout }) {
   const [lecturer, setLecturer] = useState(null);
   const [courses, setCourses] = useState([]);
+  const [reminders, setReminders] = useState([]);
   const [courseSearch, setCourseSearch] = useState('');
   const debouncedCourseSearch = useDebouncedValue(courseSearch);
   const [selectedCourseId, setSelectedCourseId] = useState('');
@@ -1200,7 +1486,40 @@ function LecturerApp({ onLogout }) {
     return () => { active = false; };
   }, [debouncedCourseSearch, notify]);
 
+  useEffect(() => {
+    let active = true;
+    async function loadReminders() {
+      try {
+        const latest = await api('/lecturer/notifications');
+        if (active) setReminders(latest);
+      } catch (requestError) {
+        if (!active) return;
+        if (requestError.message === 'Invalid session' || requestError.message === 'Not logged in') {
+          onLogout();
+        } else {
+          notify(requestError.message || 'Could not load lecture reminders.', 'error');
+        }
+      }
+    }
+
+    loadReminders();
+    const timer = window.setInterval(loadReminders, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [notify, onLogout]);
+
   const selectedCourse = courses.find((course) => String(course.id) === selectedCourseId);
+
+  async function dismissReminder(reminderId) {
+    try {
+      await api(`/lecturer/notifications/${reminderId}/read`, { method: 'POST' });
+      setReminders((current) => current.filter((reminder) => reminder.id !== reminderId));
+    } catch (requestError) {
+      notify(requestError.message || 'Could not dismiss this reminder.', 'error');
+    }
+  }
 
   async function uploadNotes(event) {
     event.preventDefault();
@@ -1234,6 +1553,23 @@ function LecturerApp({ onLogout }) {
         </div>
         <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
       </header>
+
+      {reminders.length > 0 && (
+        <section className="card lecturer-reminders" aria-label="Lecture reminders">
+          <h2>Lecture reminders</h2>
+          {reminders.map((reminder) => (
+            <article className="lecturer-reminder" key={reminder.id}>
+              <div>
+                <strong>{reminder.code} — {reminder.courseName}</strong>
+                <p>{reminder.message}</p>
+                <time>{new Date(reminder.createdAt).toLocaleString()}</time>
+              </div>
+              <button type="button" className="btn ghost small"
+                onClick={() => dismissReminder(reminder.id)}>Dismiss</button>
+            </article>
+          ))}
+        </section>
+      )}
 
       {loading ? (
         <div className="loading-state"><span className="spinner" /> Loading your courses…</div>
@@ -1329,6 +1665,348 @@ function LecturerApp({ onLogout }) {
   );
 }
 
+function CoordinatorApp({ onLogout }) {
+  const [coordinator, setCoordinator] = useState(null);
+  const [lectures, setLectures] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [activeSchedule, setActiveSchedule] = useState(null);
+  const [roster, setRoster] = useState([]);
+  const [rosterLoading, setRosterLoading] = useState(false);
+  const [roomSchedule, setRoomSchedule] = useState(null);
+  const [roomValue, setRoomValue] = useState('');
+  const [checkinCode, setCheckinCode] = useState('');
+  const [busy, setBusy] = useState('');
+  const dirtyAttendanceIds = useRef(new Set());
+  const serverAttendanceSnapshot = useRef(new Map());
+  const notify = useToast();
+
+  const refreshLectures = useCallback(async () => {
+    try {
+      setLectures(await api('/coordinator/lectures'));
+    } catch (error) {
+      if (error.message === 'Invalid session' || error.message === 'Not logged in') {
+        onLogout();
+        return;
+      }
+      notify(error.message || 'Could not refresh today’s lectures.', 'error');
+    }
+  }, [notify, onLogout]);
+
+  const refreshRoster = useCallback(async (scheduleId, silent = false) => {
+    try {
+      const latest = await api(`/coordinator/schedule/${scheduleId}/students`);
+      setRoster((current) => latest.map((student) => {
+        const existing = current.find((item) => item.id === student.id);
+        const isDirty = dirtyAttendanceIds.current.has(student.id);
+        const previousServerStatus = serverAttendanceSnapshot.current.get(student.id) ?? null;
+        const serverStatusChanged = Boolean(student.status) &&
+          previousServerStatus !== student.status;
+        serverAttendanceSnapshot.current.set(student.id, student.status || null);
+        return {
+          ...student,
+          status: (serverStatusChanged ? student.status : null) ||
+            (isDirty ? existing?.status : null) || student.status || 'ABSENT'
+        };
+      }));
+    } catch (error) {
+      if (!silent) notify(error.message || 'Could not load the class roster.', 'error');
+    }
+  }, [notify]);
+
+  useEffect(() => {
+    let active = true;
+    async function loadDashboard() {
+      setLoading(true);
+      try {
+        const [identity, todaysLectures] = await Promise.all([
+          api('/coordinator/me'),
+          api('/coordinator/lectures')
+        ]);
+        if (active) {
+          setCoordinator(identity);
+          setLectures(todaysLectures);
+        }
+      } catch (error) {
+        if (active && (error.message === 'Invalid session' || error.message === 'Not logged in')) {
+          onLogout();
+        } else if (active) {
+          notify(error.message || 'Could not load the coordinator dashboard.', 'error');
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadDashboard();
+    const timer = window.setInterval(() => {
+      if (active) refreshLectures();
+    }, 15000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [notify, onLogout, refreshLectures]);
+
+  useEffect(() => {
+    if (!activeSchedule) return undefined;
+    refreshRoster(activeSchedule.id);
+    const timer = window.setInterval(() => refreshRoster(activeSchedule.id, true), 4000);
+    return () => window.clearInterval(timer);
+  }, [activeSchedule?.id, refreshRoster]);
+
+  async function openAttendance(schedule) {
+    dirtyAttendanceIds.current.clear();
+    serverAttendanceSnapshot.current.clear();
+    setRoster([]);
+    setCheckinCode('');
+    setActiveSchedule(schedule);
+    setRosterLoading(true);
+    await refreshRoster(schedule.id);
+    setRosterLoading(false);
+  }
+
+  function updateAttendance(studentId, status) {
+    dirtyAttendanceIds.current.add(studentId);
+    setRoster((current) => current.map((student) =>
+      student.id === studentId ? { ...student, status } : student
+    ));
+  }
+
+  async function saveAttendance() {
+    if (!activeSchedule || !roster.length || busy) return;
+    setBusy('attendance');
+    try {
+      const result = await api('/coordinator/attendance', {
+        method: 'POST',
+        body: JSON.stringify({
+          scheduleId: activeSchedule.id,
+          students: roster.map((student) => ({
+            student_id: student.id,
+            status: student.status || 'ABSENT'
+          }))
+        })
+      });
+      dirtyAttendanceIds.current.clear();
+      await Promise.all([
+        refreshRoster(activeSchedule.id, true),
+        refreshLectures()
+      ]);
+      notify(`Attendance saved for ${result.markedCount} students.`);
+    } catch (error) {
+      notify(error.message || 'Could not save attendance.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function generateCheckinCode() {
+    if (!activeSchedule || busy) return;
+    setBusy('code');
+    try {
+      const result = await api(`/coordinator/schedule/${activeSchedule.id}/generate-code`, {
+        method: 'POST'
+      });
+      setCheckinCode(result.code);
+    } catch (error) {
+      notify(error.message || 'Could not generate a check-in code.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function saveRoom(event) {
+    event.preventDefault();
+    if (!roomSchedule || busy) return;
+    setBusy('room');
+    try {
+      const result = await api(`/coordinator/schedule/${roomSchedule.id}/room`, {
+        method: 'PUT',
+        body: JSON.stringify({ room: roomValue.trim() })
+      });
+      setLectures((current) => current.map((lecture) =>
+        lecture.id === roomSchedule.id ? { ...lecture, room: result.room } : lecture
+      ));
+      setRoomSchedule(null);
+      notify(`Room updated to ${result.room}.`);
+    } catch (error) {
+      notify(error.message || 'Could not update the lecture room.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function remindLecturer(lecture) {
+    if (busy) return;
+    setBusy(`remind-${lecture.id}`);
+    try {
+      const result = await api(`/coordinator/schedule/${lecture.id}/remind-lecturer`, {
+        method: 'POST'
+      });
+      notify(result.lecturerEmail
+        ? `In-app lecture reminder sent to ${result.lecturerEmail}.`
+        : 'In-app lecture reminder sent.');
+    } catch (error) {
+      notify(error.message || 'Could not send the lecture reminder.', 'error');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  return (
+    <main className="page coordinator-page">
+      <header className="topbar">
+        <div>
+          <div className="hello">Lecture Coordinator</div>
+          <div className="muted small">{coordinator?.school || 'Your school'} · Assigned course units</div>
+        </div>
+        <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
+      </header>
+
+      <section className="coordinator-heading">
+        <div>
+          <span className="eyebrow">{new Intl.DateTimeFormat(undefined, {
+            weekday: 'long', day: 'numeric', month: 'long'
+          }).format(new Date())}</span>
+          <h1>Today’s Lectures</h1>
+          <p>Confirm rooms, remind lecturers, and record class attendance for your assigned course units.</p>
+        </div>
+        <button type="button" className="btn ghost" onClick={refreshLectures}>Refresh</button>
+      </section>
+
+      {loading ? (
+        <div className="loading-state"><span className="spinner" /> Loading today’s lectures…</div>
+      ) : !lectures.length ? (
+        <section className="empty">
+          <h2>No lectures scheduled today</h2>
+          <p className="muted">There are no lectures for your assigned course units today.</p>
+        </section>
+      ) : (
+        <section className="coordinator-lecture-list" aria-label="Today's lectures">
+          {lectures.map((lecture) => (
+            <article className="card coordinator-lecture-card" key={lecture.id}>
+              <div className="coordinator-lecture-time">
+                <strong>{formatTime(lecture.startTime)}</strong>
+                <span>{formatTime(lecture.endTime)}</span>
+              </div>
+              <div className="coordinator-lecture-details">
+                <h2>{lecture.code} — {lecture.courseName}</h2>
+                <p><strong>Room:</strong> {lecture.room}</p>
+                <p><strong>Lecturer:</strong> {lecture.lecturerName || 'Not assigned'}</p>
+                {lecture.lecturerEmail && (
+                  <p><strong>Email:</strong> <a href={`mailto:${lecture.lecturerEmail}`}>{lecture.lecturerEmail}</a></p>
+                )}
+                <p className="muted small">
+                  {lecture.attendedCount} of {lecture.studentCount} students checked in
+                </p>
+              </div>
+              <div className="coordinator-lecture-actions">
+                <button type="button" className="btn ghost"
+                  onClick={() => remindLecturer(lecture)}
+                  disabled={!lecture.lecturerName || busy === `remind-${lecture.id}`}>
+                  {busy === `remind-${lecture.id}` ? 'Sending…' : 'Remind Lecturer'}
+                </button>
+                <button type="button" className="btn ghost"
+                  onClick={() => { setRoomSchedule(lecture); setRoomValue(lecture.room); }}>
+                  Change Room
+                </button>
+                <button type="button" className="btn primary"
+                  onClick={() => openAttendance(lecture)}>
+                  Take Attendance
+                </button>
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
+
+      {roomSchedule && (
+        <div className="modal-backdrop" role="presentation">
+          <form className="modal" role="dialog" aria-modal="true"
+            aria-labelledby="change-room-title" onSubmit={saveRoom}>
+            <h2 id="change-room-title">Change lecture room</h2>
+            <p>{roomSchedule.code} — {roomSchedule.courseName}</p>
+            <label>New room
+              <input autoFocus maxLength={50} required value={roomValue}
+                onChange={(event) => setRoomValue(event.target.value)} />
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost"
+                onClick={() => setRoomSchedule(null)} disabled={busy === 'room'}>Cancel</button>
+              <button type="submit" className="btn primary"
+                disabled={busy === 'room' || !roomValue.trim()}>
+                {busy === 'room' ? 'Saving…' : 'Save room'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {activeSchedule && (
+        <div className="modal-backdrop coordinator-modal-backdrop" role="presentation">
+          <section className="modal coordinator-attendance-modal" role="dialog" aria-modal="true"
+            aria-labelledby="attendance-title">
+            <header className="coordinator-modal-heading">
+              <div>
+                <span className="eyebrow">{activeSchedule.startTime && formatTime(activeSchedule.startTime)} · {activeSchedule.room}</span>
+                <h2 id="attendance-title">{activeSchedule.code} — {activeSchedule.courseName}</h2>
+              </div>
+              <button type="button" className="modal-close-button" aria-label="Close attendance"
+                onClick={() => setActiveSchedule(null)}>×</button>
+            </header>
+            <div className="checkin-code-section">
+              <button type="button" className="btn ghost"
+                onClick={generateCheckinCode} disabled={busy === 'code'}>
+                {busy === 'code' ? 'Generating…' : 'Generate Check-in Code'}
+              </button>
+              {checkinCode && (
+                <output className="checkin-code" aria-label={`Check-in code ${checkinCode}`}>
+                  {checkinCode.split('').join(' ')}
+                </output>
+              )}
+              {checkinCode && <p>Students can use this code to check in during class.</p>}
+            </div>
+            <div className="coordinator-roster-heading">
+              <h3>Class roster <span>({roster.length})</span></h3>
+              <span className="live-attendance-label"><i /> Live check-ins</span>
+            </div>
+            <div className="coordinator-roster">
+              {rosterLoading && !roster.length ? (
+                <div className="inline-loading"><span className="spinner" /> Loading class roster…</div>
+              ) : !roster.length ? (
+                <p className="muted small">No eligible registered students are in this class.</p>
+              ) : roster.map((student) => (
+                <label key={student.id}
+                  className={`coordinator-roster-row${['PRESENT', 'LATE'].includes(student.status) ? ' present' : ''}`}>
+                  <span className="coordinator-student-name">
+                    <strong>{student.firstName} {student.lastName}</strong>
+                    <small>{student.studentNumber}</small>
+                  </span>
+                  <select value={student.status || 'ABSENT'}
+                    aria-label={`Attendance status for ${student.firstName} ${student.lastName}`}
+                    onChange={(event) => updateAttendance(student.id, event.target.value)}>
+                    <option value="PRESENT">Present</option>
+                    <option value="ABSENT">Absent</option>
+                    <option value="LATE">Late</option>
+                  </select>
+                </label>
+              ))}
+            </div>
+            <footer className="coordinator-modal-actions">
+              <button type="button" className="btn ghost"
+                onClick={() => setActiveSchedule(null)}>Close</button>
+              <button type="button" className="btn primary"
+                onClick={saveAttendance}
+                disabled={busy === 'attendance' || rosterLoading || !roster.length}>
+                {busy === 'attendance' ? 'Saving…' : 'Save Attendance'}
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+    </main>
+  );
+}
+
 function SuperAdminApp({ onLogout }) {
   return <AdminApp onLogout={onLogout} superAdmin />;
 }
@@ -1336,12 +2014,16 @@ function SuperAdminApp({ onLogout }) {
 function AdminApp({ onLogout, superAdmin = false }) {
   const [adminIdentity, setAdminIdentity] = useState(null);
   const [managedAdmins, setManagedAdmins] = useState([]);
-  const [adminForm, setAdminForm] = useState({ email: '', password: '', school: 'SCI' });
+  const [adminForm, setAdminForm] = useState({
+    email: '', password: '', school: 'SCI', role: 'SCHOOL_ADMIN'
+  });
   const [units, setUnits] = useState([]);
   const [assignmentUnits, setAssignmentUnits] = useState([]);
   const [lecturers, setLecturers] = useState([]);
+  const [coordinators, setCoordinators] = useState([]);
   const [visibleLecturers, setVisibleLecturers] = useState([]);
   const [lecturerAssignments, setLecturerAssignments] = useState({});
+  const [coordinatorAssignments, setCoordinatorAssignments] = useState({});
   const [classes, setClasses] = useState([]);
   const [exams, setExams] = useState([]);
   const [students, setStudents] = useState([]);
@@ -1400,13 +2082,15 @@ function AdminApp({ onLogout, superAdmin = false }) {
     try {
       const [
         availableUnits, assignmentUnitResults, scheduledExams, chatOptions,
-        availableLecturers, searchedLecturers, scheduledClasses, searchedStudents, identity
+        availableLecturers, availableCoordinators, searchedLecturers,
+        scheduledClasses, searchedStudents, identity
       ] = await Promise.all([
         api('/admin/course-units'),
         api(`/admin/course-units?search=${encodeURIComponent(debouncedAdminUnitSearch)}`),
         api(`/admin/exams?search=${encodeURIComponent(debouncedAdminExamSearch)}`),
         api('/admin/chat-options'),
         api('/admin/lecturers'),
+        api('/admin/coordinators'),
         api(`/admin/lecturers?search=${encodeURIComponent(debouncedLecturerSearch)}`),
         api('/admin/classes'),
         api(`/admin/students?search=${encodeURIComponent(debouncedStudentSearch)}`),
@@ -1416,12 +2100,16 @@ function AdminApp({ onLogout, superAdmin = false }) {
       setAssignmentUnits(assignmentUnitResults);
       setExams(scheduledExams);
       setLecturers(availableLecturers);
+      setCoordinators(availableCoordinators);
       setVisibleLecturers(searchedLecturers);
       setClasses(scheduledClasses);
       setStudents(searchedStudents);
       setAdminIdentity(identity);
       setLecturerAssignments(Object.fromEntries(
         availableUnits.map((unit) => [unit.id, unit.lecturerId ? String(unit.lecturerId) : ''])
+      ));
+      setCoordinatorAssignments(Object.fromEntries(
+        availableUnits.map((unit) => [unit.id, unit.coordinatorId ? String(unit.coordinatorId) : ''])
       ));
       setAvailableDegrees([...new Set([...DEGREE_PROGRAMS, ...chatOptions.degreePrograms])]);
     } catch (requestError) {
@@ -1559,11 +2247,16 @@ function AdminApp({ onLogout, superAdmin = false }) {
         method: 'POST',
         body: JSON.stringify(adminForm)
       });
-      setAdminForm({ email: '', password: '', school: 'SCI' });
+      setAdminForm({ email: '', password: '', school: 'SCI', role: 'SCHOOL_ADMIN' });
       setManagedAdmins(await api('/superadmin/admins'));
-      notify('School admin account created.');
+      if (adminForm.role === 'COORDINATOR') {
+        setCoordinators(await api('/admin/coordinators'));
+      }
+      notify(adminForm.role === 'COORDINATOR'
+        ? 'Lecture Coordinator account created.'
+        : 'School admin account created.');
     } catch (requestError) {
-      notify(requestError.message || 'Could not create the school admin.', 'error');
+      notify(requestError.message || 'Could not create the account.', 'error');
     } finally {
       setBusyAction('');
     }
@@ -1585,6 +2278,40 @@ function AdminApp({ onLogout, superAdmin = false }) {
       notify(lecturerId ? 'Lecturer assigned to course.' : 'Lecturer assignment removed.');
     } catch (requestError) {
       notify(requestError.message || 'Could not update the course assignment.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function assignCoordinator(courseUnit) {
+    const coordinatorId = coordinatorAssignments[courseUnit.id] || null;
+    setBusyAction(`coordinator-${courseUnit.id}`);
+    try {
+      await api(`/admin/course-units/${courseUnit.id}/coordinator`, {
+        method: 'PUT',
+        body: JSON.stringify({ coordinatorId: coordinatorId ? Number(coordinatorId) : null })
+      });
+      setUnits((current) => current.map((unit) =>
+        unit.id === courseUnit.id
+          ? {
+            ...unit,
+            coordinatorId: coordinatorId ? Number(coordinatorId) : null,
+            coordinatorEmail: coordinators.find((item) => String(item.id) === coordinatorId)?.email || null
+          }
+          : unit
+      ));
+      setAssignmentUnits((current) => current.map((unit) =>
+        unit.id === courseUnit.id
+          ? {
+            ...unit,
+            coordinatorId: coordinatorId ? Number(coordinatorId) : null,
+            coordinatorEmail: coordinators.find((item) => String(item.id) === coordinatorId)?.email || null
+          }
+          : unit
+      ));
+      notify(coordinatorId ? 'Lecture Coordinator assigned to course unit.' : 'Course unit coordinator assignment removed.');
+    } catch (requestError) {
+      notify(requestError.message || 'Could not update the coordinator assignment.', 'error');
     } finally {
       setBusyAction('');
     }
@@ -1743,8 +2470,8 @@ function AdminApp({ onLogout, superAdmin = false }) {
       {tab === 'admins' && isSuperAdminUser && (
         <div className="lecturer-management">
           <section className="card">
-            <h2>Create school admin</h2>
-            <p className="muted small">School admins can only manage the school assigned to their account.</p>
+            <h2>Create school admin or coordinator</h2>
+            <p className="muted small">Create a Lecture Coordinator account, then assign it to one or more course units in Manage.</p>
             <form className="form" onSubmit={addSchoolAdmin}>
               <label>Email
                 <input required type="email" autoComplete="email" maxLength={100}
@@ -1762,8 +2489,15 @@ function AdminApp({ onLogout, superAdmin = false }) {
                   {SCHOOLS.map((school) => <option key={school} value={school}>{school}</option>)}
                 </select>
               </label>
+              <label>Account role
+                <select value={adminForm.role}
+                  onChange={(event) => setAdminForm({ ...adminForm, role: event.target.value })}>
+                  <option value="SCHOOL_ADMIN">School admin</option>
+                  <option value="COORDINATOR">Lecture Coordinator</option>
+                </select>
+              </label>
               <button className="btn primary" disabled={busyAction === 'admin'}>
-                {busyAction === 'admin' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create school admin'}
+                {busyAction === 'admin' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create account'}
               </button>
             </form>
           </section>
@@ -1774,7 +2508,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
                 {managedAdmins.map((managedAdmin) => (
                   <li key={managedAdmin.id}>
                     <strong>{managedAdmin.email}</strong>
-                    <span>{managedAdmin.role === 'SUPER_ADMIN' ? 'All schools' : managedAdmin.school}</span>
+                    <span>{managedAdmin.role === 'SUPER_ADMIN'
+                      ? 'Super Admin · All schools'
+                      : `${managedAdmin.role === 'COORDINATOR' ? 'Lecture Coordinator' : 'School Admin'} · ${managedAdmin.school}`}</span>
                   </li>
                 ))}
               </ul>
@@ -2103,16 +2839,16 @@ function AdminApp({ onLogout, superAdmin = false }) {
             )}
           </section>
           <section className="card lecturer-assignment-card">
-            <h2>Assign lecturers to existing course units</h2>
+            <h2>Assign lecturers and Lecture Coordinators</h2>
             <p className="muted small">
-              Choose a lecturer for each course and save the assignment. This also updates lecturer access to that course’s notes and class chat.
+              Assign a lecturer and one Lecture Coordinator to each course unit. Coordinators can confirm rooms, remind that unit’s lecturer, and take attendance.
             </p>
             {!units.length ? (
               <p className="muted">Create course units before assigning lecturers.</p>
-            ) : !lecturers.length ? (
-              <p className="muted">Create lecturer accounts before assigning them to courses.</p>
             ) : (
               <>
+                {!lecturers.length && <p className="muted small">Create lecturer accounts to enable lecturer assignments.</p>}
+                {!coordinators.length && <p className="muted small">Create Lecture Coordinator accounts to enable coordinator assignments.</p>}
                 <SearchBar value={unitSearch} onChange={setUnitSearch}
                   placeholder="Search course units by code or name…" label="Search course assignments" />
                 {!assignmentUnits.length ? noSearchResults(unitSearch) : null}
@@ -2147,7 +2883,31 @@ function AdminApp({ onLogout, superAdmin = false }) {
                       disabled={busyAction === `assign-${unit.id}`}>
                       {busyAction === `assign-${unit.id}`
                         ? <><span className="spinner spinner-light" /> Saving…</>
-                        : 'Save assignment'}
+                        : 'Save lecturer'}
+                    </button>
+                    <label className="lecturer-assignment-select">
+                      <span className="sr-only">Lecture Coordinator for {unit.code}</span>
+                      <select
+                        value={coordinatorAssignments[unit.id] ?? ''}
+                        onChange={(event) => setCoordinatorAssignments((current) => ({
+                          ...current,
+                          [unit.id]: event.target.value
+                        }))}
+                      >
+                        <option value="">No coordinator assigned</option>
+                        {coordinators.filter((item) => item.school === unit.school).map((coordinator) => (
+                          <option key={coordinator.id} value={coordinator.id}>
+                            {coordinator.email} · {coordinator.school}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button type="button" className="btn primary small"
+                      onClick={() => assignCoordinator(unit)}
+                      disabled={busyAction === `coordinator-${unit.id}`}>
+                      {busyAction === `coordinator-${unit.id}`
+                        ? <><span className="spinner spinner-light" /> Saving…</>
+                        : 'Save coordinator'}
                     </button>
                   </div>
                 ))}

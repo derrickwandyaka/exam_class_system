@@ -16,6 +16,7 @@ export default function ChatPanel({
   lecturer = null,
   targetRoom = 'GLOBAL',
   courseUnit = null,
+  onRead,
   fullPage = false
 }) {
   const [messages, setMessages] = useState([]);
@@ -29,8 +30,14 @@ export default function ChatPanel({
   const [deletingMessageId, setDeletingMessageId] = useState(null);
   const messagesEndRef = useRef(null);
   const pollErrorShown = useRef(false);
+  const lastMarkedMessageId = useRef(0);
+  const onReadRef = useRef(onRead);
   const notify = useToast();
   const currentUserId = student?.id;
+
+  useEffect(() => {
+    onReadRef.current = onRead;
+  }, [onRead]);
 
   useEffect(() => {
     let active = true;
@@ -46,6 +53,25 @@ export default function ChatPanel({
         if (active) {
           setMessages(latest);
           pollErrorShown.current = false;
+          if (student && latest.length) {
+            const newestMessageId = Math.max(...latest.map((message) => Number(message.id) || 0));
+            if (newestMessageId > lastMarkedMessageId.current) {
+              lastMarkedMessageId.current = newestMessageId;
+              try {
+                await api('/chat/read', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    ...(courseUnit ? { courseUnitId: courseUnit.id } : {}),
+                    lastReadMessageId: newestMessageId
+                  })
+                });
+                if (active) onReadRef.current?.();
+              } catch (error) {
+                lastMarkedMessageId.current = 0;
+                if (active) notify(error.message || 'Could not mark this chat as read.', 'error');
+              }
+            }
+          }
         }
       } catch {
         if (active && !pollErrorShown.current) {
@@ -63,7 +89,7 @@ export default function ChatPanel({
       active = false;
       window.clearInterval(timer);
     };
-  }, [admin, notify, targetRoom]);
+  }, [admin, courseUnit?.id, lecturer?.id, notify, student?.id, targetRoom]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -126,14 +152,13 @@ export default function ChatPanel({
   }
 
   async function deleteMessage(messageId) {
-    if (deletingMessageId !== null || !window.confirm('Delete this message? This cannot be undone.')) return;
+    if (deletingMessageId !== null) return;
 
     setDeletingMessageId(messageId);
     try {
       await api(`/messages/${messageId}`, { method: 'DELETE' });
       setMessages((current) => current.filter((message) => message.id !== messageId));
       if (editingMessageId === messageId) cancelEditing();
-      notify('Message deleted.');
     } catch (error) {
       notify(error.message || 'Could not delete your message. Please try again.', 'error');
     } finally {
