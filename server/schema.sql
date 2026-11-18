@@ -7,15 +7,30 @@ SET NAMES utf8mb4;
 
 CREATE TABLE IF NOT EXISTS admins (
   id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL DEFAULT '',
   email VARCHAR(100) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
-  school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL') NOT NULL,
-  role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER') NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  role ENUM('SUPER_ADMIN', 'UNIVERSITY_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR') NOT NULL,
+  university_code VARCHAR(30) NULL,
+  school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL') NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_admins_university_role_school (university_code, role, school)
 );
 
-ALTER TABLE admins
-  MODIFY COLUMN role ENUM('SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER') NOT NULL;
+CREATE TABLE IF NOT EXISTS api_keys (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(100) NOT NULL,
+  university_code VARCHAR(30) NULL,
+  key_prefix VARCHAR(16) NOT NULL,
+  key_hash CHAR(64) NOT NULL UNIQUE,
+  created_by INT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_used_at TIMESTAMP NULL DEFAULT NULL,
+  KEY idx_api_keys_created_by (created_by),
+  CONSTRAINT fk_api_key_admin FOREIGN KEY (created_by)
+    REFERENCES admins(id) ON DELETE SET NULL
+);
 
 CREATE TABLE IF NOT EXISTS students (
   id INT AUTO_INCREMENT PRIMARY KEY,
@@ -24,6 +39,7 @@ CREATE TABLE IF NOT EXISTS students (
   student_number VARCHAR(20) NOT NULL UNIQUE,
   academic_level ENUM('Certificate', 'Diploma', 'Degree', 'Masters', 'PhD') NOT NULL DEFAULT 'Degree',
   program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE') NOT NULL,
+  university_code VARCHAR(30) NOT NULL DEFAULT 'NKUMBA',
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL,
   phone_number VARCHAR(20) NULL,
   degree_program VARCHAR(30) NOT NULL DEFAULT 'UNASSIGNED',
@@ -32,7 +48,8 @@ CREATE TABLE IF NOT EXISTS students (
   email VARCHAR(100) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
   profile_picture LONGTEXT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_students_university_school (university_code, school)
 );
 
 CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -54,14 +71,17 @@ CREATE TABLE IF NOT EXISTS lecturers (
   name VARCHAR(100) NOT NULL,
   email VARCHAR(100) NOT NULL UNIQUE,
   password_hash VARCHAR(255) NOT NULL,
+  university_code VARCHAR(30) NOT NULL DEFAULT 'NKUMBA',
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_lecturers_university_school (university_code, school)
 );
 
 CREATE TABLE IF NOT EXISTS course_units (
   id INT AUTO_INCREMENT PRIMARY KEY,
   code VARCHAR(40) NOT NULL,
   name VARCHAR(120) NOT NULL,
+  university_code VARCHAR(30) NOT NULL DEFAULT 'NKUMBA',
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL,
   degree_program VARCHAR(30) NOT NULL DEFAULT 'UNASSIGNED',
   academic_level ENUM('Certificate', 'Diploma', 'Degree', 'Masters', 'PhD') NOT NULL DEFAULT 'Degree',
@@ -72,8 +92,9 @@ CREATE TABLE IF NOT EXISTS course_units (
   semester TINYINT UNSIGNED NOT NULL,
   KEY idx_course_units_lecturer_id (lecturer_id),
   KEY idx_course_units_coordinator_id (coordinator_id),
+  KEY idx_course_units_university_school (university_code, school),
   UNIQUE KEY uniq_course_offering
-    (school, degree_program, academic_level, year_of_study, semester, code, name),
+    (university_code, school, degree_program, academic_level, year_of_study, semester, code, name),
   CONSTRAINT fk_course_lecturer FOREIGN KEY (lecturer_id)
     REFERENCES lecturers(id) ON DELETE SET NULL,
   CONSTRAINT fk_course_coordinator FOREIGN KEY (coordinator_id)
@@ -84,6 +105,7 @@ CREATE TABLE IF NOT EXISTS class_schedules (
   id INT AUTO_INCREMENT PRIMARY KEY,
   course_unit_id INT NOT NULL,
   lecturer_id INT NULL,
+  coordinator_id INT NULL,
   day_of_week ENUM('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday') NOT NULL,
   start_time TIME NOT NULL,
   end_time TIME NOT NULL,
@@ -94,10 +116,13 @@ CREATE TABLE IF NOT EXISTS class_schedules (
   KEY idx_class_schedules_course_program (course_unit_id, program),
   KEY idx_class_schedules_day_time (day_of_week, start_time),
   KEY idx_class_schedules_lecturer_id (lecturer_id),
+  KEY idx_class_schedules_coordinator_id (coordinator_id),
   CONSTRAINT fk_class_schedule_course FOREIGN KEY (course_unit_id)
     REFERENCES course_units(id) ON DELETE CASCADE,
   CONSTRAINT fk_class_schedule_lecturer FOREIGN KEY (lecturer_id)
-    REFERENCES lecturers(id) ON DELETE SET NULL
+    REFERENCES lecturers(id) ON DELETE SET NULL,
+  CONSTRAINT fk_class_schedule_coordinator FOREIGN KEY (coordinator_id)
+    REFERENCES admins(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS attendance (
@@ -172,6 +197,7 @@ CREATE TABLE IF NOT EXISTS exams (
   end_time TIME NOT NULL,
   room VARCHAR(50) NOT NULL,
   program ENUM('DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH', 'ALL') NOT NULL DEFAULT 'BOTH',
+  university_code VARCHAR(30) NOT NULL DEFAULT 'NKUMBA',
   school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other') NOT NULL DEFAULT 'Other',
   invigilator_id INT NULL,
   room_assigned_by INT NULL,
@@ -182,6 +208,7 @@ CREATE TABLE IF NOT EXISTS exams (
   source_date_label VARCHAR(100) NULL,
   source_text TEXT NULL,
   KEY idx_exams_invigilator_id (invigilator_id),
+  KEY idx_exams_university_school (university_code, school),
   CONSTRAINT fk_exam_course FOREIGN KEY (course_unit_id)
     REFERENCES course_units(id) ON DELETE CASCADE,
   CONSTRAINT fk_exam_invigilator FOREIGN KEY (invigilator_id)
@@ -216,12 +243,14 @@ CREATE TABLE IF NOT EXISTS messages (
   text TEXT NOT NULL,
   is_broadcast BOOLEAN NOT NULL DEFAULT FALSE,
   target_room VARCHAR(100) NOT NULL DEFAULT 'GLOBAL',
+  university_code VARCHAR(30) NOT NULL DEFAULT 'NKUMBA',
   target_school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL') NOT NULL DEFAULT 'ALL',
   course_unit_id INT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   edited_at TIMESTAMP NULL DEFAULT NULL,
   KEY idx_messages_created_at (created_at, id),
   KEY idx_messages_target_room_created (target_room, created_at, id),
+  KEY idx_messages_university_school (university_code, target_school, created_at, id),
   KEY idx_messages_course_unit_created (course_unit_id, created_at, id),
   KEY idx_messages_sender_lecturer_id (sender_lecturer_id),
   CONSTRAINT fk_message_sender FOREIGN KEY (sender_id)
@@ -426,6 +455,19 @@ CALL add_column_if_missing(
   'target_room',
   'VARCHAR(100) NOT NULL DEFAULT ''GLOBAL'''
 );
+CALL add_column_if_missing('admins', 'name', 'VARCHAR(100) NOT NULL DEFAULT '''' AFTER id');
+CALL add_column_if_missing('admins', 'university_code', 'VARCHAR(30) NULL AFTER role');
+CALL add_column_if_missing('students', 'university_code', 'VARCHAR(30) NOT NULL DEFAULT ''NKUMBA'' AFTER program');
+CALL add_column_if_missing('lecturers', 'university_code', 'VARCHAR(30) NOT NULL DEFAULT ''NKUMBA'' AFTER password_hash');
+CALL add_column_if_missing('course_units', 'university_code', 'VARCHAR(30) NOT NULL DEFAULT ''NKUMBA'' AFTER name');
+CALL add_column_if_missing('exams', 'university_code', 'VARCHAR(30) NOT NULL DEFAULT ''NKUMBA'' AFTER program');
+CALL add_column_if_missing('messages', 'university_code', 'VARCHAR(30) NOT NULL DEFAULT ''NKUMBA'' AFTER target_room');
+CALL add_column_if_missing('class_schedules', 'coordinator_id', 'INT NULL AFTER lecturer_id');
+
+ALTER TABLE admins
+  MODIFY COLUMN role ENUM('SUPER_ADMIN', 'UNIVERSITY_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR') NOT NULL;
+ALTER TABLE admins
+  MODIFY COLUMN school ENUM('SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL') NULL;
 
 ALTER TABLE course_units MODIFY COLUMN code VARCHAR(40) NOT NULL;
 ALTER TABLE students
@@ -437,7 +479,42 @@ CALL drop_course_offering_unique();
 CALL add_index_if_missing(
   'course_units',
   'uniq_course_offering',
-  'UNIQUE KEY uniq_course_offering (school, degree_program, academic_level, year_of_study, semester, code, name)'
+  'UNIQUE KEY uniq_course_offering (university_code, school, degree_program, academic_level, year_of_study, semester, code, name)'
+);
+CALL add_index_if_missing(
+  'admins',
+  'idx_admins_university_role_school',
+  'KEY idx_admins_university_role_school (university_code, role, school)'
+);
+CALL add_index_if_missing(
+  'students',
+  'idx_students_university_school',
+  'KEY idx_students_university_school (university_code, school)'
+);
+CALL add_index_if_missing(
+  'lecturers',
+  'idx_lecturers_university_school',
+  'KEY idx_lecturers_university_school (university_code, school)'
+);
+CALL add_index_if_missing(
+  'course_units',
+  'idx_course_units_university_school',
+  'KEY idx_course_units_university_school (university_code, school)'
+);
+CALL add_index_if_missing(
+  'exams',
+  'idx_exams_university_school',
+  'KEY idx_exams_university_school (university_code, school)'
+);
+CALL add_index_if_missing(
+  'messages',
+  'idx_messages_university_school',
+  'KEY idx_messages_university_school (university_code, target_school, created_at, id)'
+);
+CALL add_index_if_missing(
+  'class_schedules',
+  'idx_class_schedules_coordinator_id',
+  'KEY idx_class_schedules_coordinator_id (coordinator_id)'
 );
 CALL add_index_if_missing(
   'exams',
@@ -485,6 +562,11 @@ CALL add_constraint_if_missing(
   'CONSTRAINT fk_course_coordinator FOREIGN KEY (coordinator_id) REFERENCES admins(id) ON DELETE SET NULL'
 );
 CALL add_constraint_if_missing(
+  'class_schedules',
+  'fk_class_schedule_coordinator',
+  'CONSTRAINT fk_class_schedule_coordinator FOREIGN KEY (coordinator_id) REFERENCES admins(id) ON DELETE SET NULL'
+);
+CALL add_constraint_if_missing(
   'messages',
   'fk_message_course',
   'CONSTRAINT fk_message_course FOREIGN KEY (course_unit_id) REFERENCES course_units(id) ON DELETE CASCADE'
@@ -515,6 +597,19 @@ DROP PROCEDURE drop_legacy_course_code_unique;
 DROP PROCEDURE drop_course_offering_unique;
 DROP PROCEDURE add_index_if_missing;
 DROP PROCEDURE add_constraint_if_missing;
+
+UPDATE admins
+SET university_code = NULL, school = NULL
+WHERE role = 'SUPER_ADMIN';
+
+UPDATE admins
+SET school = NULL
+WHERE role IN ('UNIVERSITY_ADMIN', 'EXAM_OFFICER');
+
+UPDATE admins
+SET university_code = 'NKUMBA'
+WHERE role IN ('UNIVERSITY_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR')
+  AND (university_code IS NULL OR TRIM(university_code) = '');
 
 UPDATE students
 SET degree_program = 'UNASSIGNED'

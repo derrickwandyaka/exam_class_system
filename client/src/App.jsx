@@ -320,7 +320,8 @@ export default function App() {
   }
 
   if (role === 'SUPER_ADMIN') return <SuperAdminApp onLogout={logout} />;
-  if (role === 'SCHOOL_ADMIN') return <AdminApp onLogout={logout} />;
+  if (role === 'UNIVERSITY_ADMIN') return <UniAdminApp onLogout={logout} />;
+  if (role === 'SCHOOL_ADMIN') return <SchoolAdminApp onLogout={logout} />;
   if (role === 'EXAM_OFFICER') return <ExamOfficerApp onLogout={logout} />;
   if (role === 'COORDINATOR') return <CoordinatorApp onLogout={logout} />;
   if (role === 'student') return <StudentApp onLogout={logout} />;
@@ -333,12 +334,14 @@ function AuthScreen({ onAuth }) {
   const [busy, setBusy] = useState(false);
   const notify = useToast();
   const [login, setLogin] = useState({ email: '', password: '' });
+  const [universities, setUniversities] = useState(['NKUMBA']);
   const [registrationPrograms, setRegistrationPrograms] = useState([]);
   const [loadingRegistrationPrograms, setLoadingRegistrationPrograms] = useState(false);
   const [registration, setRegistration] = useState({
     firstName: '',
     lastName: '',
     studentNumber: '',
+    universityCode: 'NKUMBA',
     academicLevel: 'Degree',
     program: 'DAY',
     school: 'SCI',
@@ -353,9 +356,27 @@ function AuthScreen({ onAuth }) {
   useEffect(() => {
     if (tab !== 'register') return undefined;
     let active = true;
+    api('/universities')
+      .then((codes) => {
+        if (active && Array.isArray(codes) && codes.length) {
+          setUniversities(codes);
+          setRegistration((current) => (
+            codes.includes(current.universityCode)
+              ? current
+              : { ...current, universityCode: codes[0], degreeProgram: '' }
+          ));
+        }
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab !== 'register') return undefined;
+    let active = true;
     setRegistrationPrograms([]);
     setLoadingRegistrationPrograms(true);
-    api(`/registration-programs?school=${encodeURIComponent(registration.school)}&academicLevel=${encodeURIComponent(registration.academicLevel)}`)
+    api(`/registration-programs?universityCode=${encodeURIComponent(registration.universityCode)}&school=${encodeURIComponent(registration.school)}&academicLevel=${encodeURIComponent(registration.academicLevel)}`)
       .then((programs) => {
         if (!Array.isArray(programs)) {
           throw new Error('The server returned an invalid degree program list.');
@@ -369,7 +390,7 @@ function AuthScreen({ onAuth }) {
         if (active) setLoadingRegistrationPrograms(false);
       });
     return () => { active = false; };
-  }, [tab, registration.school, registration.academicLevel, notify]);
+  }, [tab, registration.universityCode, registration.school, registration.academicLevel, notify]);
 
   function changeTab(nextTab) {
     setTab(nextTab);
@@ -384,7 +405,7 @@ function AuthScreen({ onAuth }) {
         body: JSON.stringify(body)
       });
       const authenticatedRole = sessionRole || result.role;
-      if (!result.token || !['SUPER_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR', 'student', 'lecturer'].includes(authenticatedRole)) {
+      if (!result.token || !['SUPER_ADMIN', 'UNIVERSITY_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR', 'student', 'lecturer'].includes(authenticatedRole)) {
         throw new Error('Sign-in response was invalid. Please try again.');
       }
       setSession(result.token, authenticatedRole);
@@ -438,6 +459,20 @@ function AuthScreen({ onAuth }) {
             <label>Student number
               <input required value={registration.studentNumber}
                 onChange={(event) => setRegistration({ ...registration, studentNumber: event.target.value })} />
+            </label>
+            <label>University
+              <select value={registration.universityCode}
+                onChange={(event) => {
+                  setRegistration({
+                    ...registration,
+                    universityCode: event.target.value,
+                    degreeProgram: ''
+                  });
+                  setRegistrationPrograms([]);
+                  setLoadingRegistrationPrograms(true);
+                }}>
+                {universities.map((code) => <option key={code} value={code}>{code}</option>)}
+              </select>
             </label>
             <div className="row">
               <label>Academic level
@@ -1815,6 +1850,7 @@ function LecturerApp({ onLogout }) {
 }
 
 function ExamOfficerApp({ onLogout }) {
+  const [officer, setOfficer] = useState(null);
   const [exams, setExams] = useState([]);
   const [lecturers, setLecturers] = useState([]);
   const [cases, setCases] = useState([]);
@@ -1828,11 +1864,13 @@ function ExamOfficerApp({ onLogout }) {
   async function load() {
     setLoading(true);
     try {
-      const [examResults, lecturerResults, caseResults] = await Promise.all([
+      const [identity, examResults, lecturerResults, caseResults] = await Promise.all([
+        api('/examofficer/me'),
         api('/examofficer/exams'),
         api('/examofficer/lecturers'),
         api('/examofficer/cases')
       ]);
+      setOfficer(identity);
       setExams(examResults);
       setLecturers(lecturerResults);
       setCases(caseResults);
@@ -1903,7 +1941,7 @@ function ExamOfficerApp({ onLogout }) {
     <main className="page exam-officer-page">
       <header className="topbar">
         <div>
-          <div className="hello">Examination Office</div>
+          <div className="hello">Examination Office{officer?.university_code ? ` — ${officer.university_code}` : ''}</div>
           <div className="muted small">Manage exam rooms, invigilators, and malpractice reports</div>
         </div>
         <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
@@ -2197,7 +2235,7 @@ function CoordinatorApp({ onLogout }) {
       <header className="topbar">
         <div>
           <div className="hello">Lecture Coordinator</div>
-          <div className="muted small">{coordinator?.school || 'Your school'} · Assigned course units</div>
+          <div className="muted small">{coordinator?.university_code ? `${coordinator.university_code} · ` : ''}{coordinator?.school || 'Your school'} · Assigned lectures</div>
         </div>
         <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
       </header>
@@ -2348,15 +2386,507 @@ function CoordinatorApp({ onLogout }) {
 }
 
 function SuperAdminApp({ onLogout }) {
-  return <AdminApp onLogout={onLogout} superAdmin />;
+  const [identity, setIdentity] = useState(null);
+  const [tab, setTab] = useState('api-keys');
+  const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState('');
+  const [universityAdmins, setUniversityAdmins] = useState([]);
+  const [uniAdminForm, setUniAdminForm] = useState({
+    name: '', email: '', password: '', universityCode: ''
+  });
+  const [apiKeys, setApiKeys] = useState([]);
+  const [apiKeyForm, setApiKeyForm] = useState({ name: '', universityCode: '' });
+  const [revealedKey, setRevealedKey] = useState('');
+  const notify = useToast();
+
+  async function load() {
+    setLoading(true);
+    try {
+      const [me, admins, keys] = await Promise.all([
+        api('/superadmin/me'),
+        api('/superadmin/university-admins'),
+        api('/superadmin/api-keys')
+      ]);
+      setIdentity(me);
+      setUniversityAdmins(admins);
+      setApiKeys(keys);
+    } catch (error) {
+      if (error.message === 'Invalid session' || error.message === 'Not logged in') {
+        onLogout();
+        return;
+      }
+      notify(error.message || 'Could not load Super Admin data.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function createUniversityAdmin(event) {
+    event.preventDefault();
+    setBusyAction('uni-admin');
+    try {
+      await api('/superadmin/create-university-admin', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: uniAdminForm.name,
+          email: uniAdminForm.email,
+          password: uniAdminForm.password,
+          university_code: uniAdminForm.universityCode
+        })
+      });
+      setUniAdminForm({ name: '', email: '', password: '', universityCode: '' });
+      setUniversityAdmins(await api('/superadmin/university-admins'));
+      notify('University Administrator account created.');
+    } catch (error) {
+      notify(error.message || 'Could not create University Administrator.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function generateApiKey(event) {
+    event.preventDefault();
+    setBusyAction('api-key');
+    try {
+      const created = await api('/superadmin/api-keys', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: apiKeyForm.name,
+          universityCode: apiKeyForm.universityCode || null
+        })
+      });
+      setRevealedKey(created.apiKey);
+      setApiKeyForm({ name: '', universityCode: '' });
+      setApiKeys(await api('/superadmin/api-keys'));
+      notify('API key generated. Copy it now—it will not be shown again.');
+    } catch (error) {
+      notify(error.message || 'Could not generate API key.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function revokeApiKey(keyId) {
+    setBusyAction(`revoke-key-${keyId}`);
+    try {
+      await api(`/superadmin/api-keys/${keyId}`, { method: 'DELETE' });
+      setApiKeys((current) => current.filter((item) => item.id !== keyId));
+      notify('API key revoked.');
+    } catch (error) {
+      notify(error.message || 'Could not revoke API key.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function copyApiKey() {
+    if (!revealedKey) return;
+    try {
+      await navigator.clipboard.writeText(revealedKey);
+      notify('API key copied to clipboard.');
+    } catch {
+      notify('Copy the key manually from the box above.', 'error');
+    }
+  }
+
+  return (
+    <main className="page">
+      <header className="topbar">
+        <div>
+          <div className="hello">Super Admin Panel</div>
+          <div className="muted small">
+            {identity?.name ? `${identity.name} · ` : ''}Platform Owner · Multi-tenant governance &amp; API keys
+          </div>
+        </div>
+        <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
+      </header>
+      <div className="tabs" role="tablist" aria-label="Super Admin sections">
+        <button type="button" className={tab === 'api-keys' ? 'tab active' : 'tab'}
+          onClick={() => setTab('api-keys')}>API Key Manager</button>
+        <button type="button" className={tab === 'university-admins' ? 'tab active' : 'tab'}
+          onClick={() => setTab('university-admins')}>Manage University Admins</button>
+      </div>
+      {loading && <div className="inline-loading"><span className="spinner" /> Loading platform data…</div>}
+
+      {tab === 'api-keys' && (
+        <div className="lecturer-management">
+          <section className="card">
+            <h2>Generate API Key</h2>
+            <p className="muted small">Issue API keys for external integrations or university portals.</p>
+            <form className="form" onSubmit={generateApiKey}>
+              <label>Key label
+                <input required maxLength={100} placeholder="e.g. NKUMBA Timetable Sync"
+                  value={apiKeyForm.name}
+                  onChange={(event) => setApiKeyForm({ ...apiKeyForm, name: event.target.value })} />
+              </label>
+              <label>University code (optional)
+                <input maxLength={30} placeholder="Leave blank for all universities, or e.g. NKUMBA"
+                  value={apiKeyForm.universityCode}
+                  onChange={(event) => setApiKeyForm({ ...apiKeyForm, universityCode: event.target.value.toUpperCase() })} />
+              </label>
+              <button className="btn primary" disabled={busyAction === 'api-key'}>
+                {busyAction === 'api-key' ? <><span className="spinner spinner-light" /> Generating…</> : 'Generate API key'}
+              </button>
+            </form>
+            {revealedKey && (
+              <div className="api-key-reveal" role="status">
+                <strong>New API key (save it now):</strong>
+                <code>{revealedKey}</code>
+                <div className="modal-actions">
+                  <button type="button" className="btn ghost small" onClick={copyApiKey}>Copy key</button>
+                  <button type="button" className="btn ghost small" onClick={() => setRevealedKey('')}>Dismiss</button>
+                </div>
+              </div>
+            )}
+          </section>
+          <section className="card">
+            <h2>Active API Keys ({apiKeys.length})</h2>
+            {!apiKeys.length ? <p className="muted">No API keys generated yet.</p> : (
+              <ul className="management-list">
+                {apiKeys.map((keyItem) => (
+                  <li key={keyItem.id} className="api-key-row">
+                    <div>
+                      <strong>{keyItem.name}</strong>
+                      <span>
+                        Prefix: <code>{keyItem.keyPrefix}…</code> · {keyItem.universityCode || 'All universities'}
+                      </span>
+                      <span className="muted small">
+                        Created {new Date(keyItem.createdAt).toLocaleDateString()}
+                        {keyItem.lastUsedAt ? ` · Last used ${new Date(keyItem.lastUsedAt).toLocaleString()}` : ' · Never used'}
+                      </span>
+                    </div>
+                    <button type="button" className="btn danger-btn small"
+                      onClick={() => revokeApiKey(keyItem.id)}
+                      disabled={busyAction === `revoke-key-${keyItem.id}`}>
+                      {busyAction === `revoke-key-${keyItem.id}` ? 'Revoking…' : 'Revoke'}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      )}
+
+      {tab === 'university-admins' && (
+        <div className="lecturer-management">
+          <section className="card">
+            <h2>Create University Administrator</h2>
+            <p className="muted small">
+              Assign one University Administrator per university code. They will manage School Admins and Examination Office Admins for their university.
+            </p>
+            <form className="form" onSubmit={createUniversityAdmin}>
+              <label>Full name
+                <input required maxLength={100} placeholder="Dr. Jane Doe"
+                  value={uniAdminForm.name}
+                  onChange={(event) => setUniAdminForm({ ...uniAdminForm, name: event.target.value })} />
+              </label>
+              <label>Email
+                <input required type="email" autoComplete="email" maxLength={100}
+                  value={uniAdminForm.email}
+                  onChange={(event) => setUniAdminForm({ ...uniAdminForm, email: event.target.value })} />
+              </label>
+              <label>University code
+                <input required maxLength={30} placeholder="e.g. NKUMBA, MUK, UCU"
+                  value={uniAdminForm.universityCode}
+                  onChange={(event) => setUniAdminForm({ ...uniAdminForm, universityCode: event.target.value.toUpperCase() })} />
+              </label>
+              <label>Temporary password
+                <input required type="password" autoComplete="new-password" minLength={8}
+                  value={uniAdminForm.password}
+                  onChange={(event) => setUniAdminForm({ ...uniAdminForm, password: event.target.value })} />
+              </label>
+              <button className="btn primary" disabled={busyAction === 'uni-admin'}>
+                {busyAction === 'uni-admin' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create University Admin'}
+              </button>
+            </form>
+          </section>
+          <section className="card">
+            <h2>University Administrators ({universityAdmins.length})</h2>
+            {!universityAdmins.length ? <p className="muted">No University Administrators created yet.</p> : (
+              <ul className="management-list">
+                {universityAdmins.map((admin) => (
+                  <li key={admin.id}>
+                    <strong>{admin.name || admin.email}</strong>
+                    <span>{admin.email} · University: <strong>{admin.universityCode}</strong></span>
+                    <span className="muted small">Created {new Date(admin.createdAt).toLocaleDateString()}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      )}
+    </main>
+  );
 }
 
-function AdminApp({ onLogout, superAdmin = false }) {
-  const [adminIdentity, setAdminIdentity] = useState(null);
-  const [managedAdmins, setManagedAdmins] = useState([]);
-  const [adminForm, setAdminForm] = useState({
-    email: '', password: '', school: 'SCI', role: 'SCHOOL_ADMIN'
+function UniAdminApp({ onLogout }) {
+  const [identity, setIdentity] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [staff, setStaff] = useState({ admins: [], lecturers: [] });
+  const [tab, setTab] = useState('stats');
+  const [loading, setLoading] = useState(true);
+  const [busyAction, setBusyAction] = useState('');
+  const [schoolAdminForm, setSchoolAdminForm] = useState({
+    name: '', email: '', password: '', school: 'SCI'
   });
+  const [examOfficerForm, setExamOfficerForm] = useState({
+    name: '', email: '', password: ''
+  });
+  const notify = useToast();
+
+  async function load() {
+    setLoading(true);
+    try {
+      const [me, uniStats, uniStaff] = await Promise.all([
+        api('/uniadmin/me'),
+        api('/uniadmin/stats'),
+        api('/uniadmin/staff')
+      ]);
+      setIdentity(me);
+      setStats(uniStats);
+      setStaff(uniStaff);
+    } catch (error) {
+      if (error.message === 'Invalid session' || error.message === 'Not logged in') {
+        onLogout();
+        return;
+      }
+      notify(error.message || 'Could not load University Admin dashboard.', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  async function createSchoolAdmin(event) {
+    event.preventDefault();
+    setBusyAction('school-admin');
+    try {
+      await api('/uniadmin/create-school-admin', {
+        method: 'POST',
+        body: JSON.stringify(schoolAdminForm)
+      });
+      setSchoolAdminForm({ name: '', email: '', password: '', school: 'SCI' });
+      notify('School Admin account created.');
+      await load();
+    } catch (error) {
+      notify(error.message || 'Could not create School Admin.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  async function createExamOfficer(event) {
+    event.preventDefault();
+    setBusyAction('exam-officer');
+    try {
+      await api('/uniadmin/create-exam-officer', {
+        method: 'POST',
+        body: JSON.stringify(examOfficerForm)
+      });
+      setExamOfficerForm({ name: '', email: '', password: '' });
+      notify('Examination Office Admin account created.');
+      await load();
+    } catch (error) {
+      notify(error.message || 'Could not create Examination Office Admin.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  const totalStaffCount = (staff.admins?.length || 0) + (staff.lecturers?.length || 0);
+
+  return (
+    <main className="page">
+      <header className="topbar">
+        <div>
+          <div className="hello">University Admin — {identity?.university_code || 'University'}</div>
+          <div className="muted small">
+            {identity?.name ? `${identity.name} · ` : ''}High-level overview &amp; staff governance for {identity?.university_code || 'your university'}
+          </div>
+        </div>
+        <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
+      </header>
+      <div className="tabs" role="tablist" aria-label="University Admin sections">
+        <button type="button" className={tab === 'stats' ? 'tab active' : 'tab'}
+          onClick={() => setTab('stats')}>University Stats</button>
+        <button type="button" className={tab === 'staff' ? 'tab active' : 'tab'}
+          onClick={() => setTab('staff')}>Manage Staff ({totalStaffCount})</button>
+      </div>
+      {loading && <div className="inline-loading"><span className="spinner" /> Loading university data…</div>}
+
+      {tab === 'stats' && stats && (
+        <div className="uniadmin-stats-layout">
+          <section className="stats-grid" aria-label="University statistics">
+            <article className="card stat-card">
+              <span className="eyebrow">Students</span>
+              <strong>{stats.studentsCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Lecturers</span>
+              <strong>{stats.lecturersCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Course Units</span>
+              <strong>{stats.courseUnitsCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Scheduled Lectures</span>
+              <strong>{stats.classSchedulesCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Scheduled Exams</span>
+              <strong>{stats.examsCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Pending Malpractice</span>
+              <strong>{stats.pendingMalpracticeCasesCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">School Admins</span>
+              <strong>{stats.schoolAdminsCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Exam Officers</span>
+              <strong>{stats.examOfficersCount}</strong>
+            </article>
+            <article className="card stat-card">
+              <span className="eyebrow">Coordinators</span>
+              <strong>{stats.coordinatorsCount}</strong>
+            </article>
+          </section>
+          <section className="card">
+            <h2>Schools in {stats.universityCode}</h2>
+            {!stats.schoolBreakdown?.length ? (
+              <p className="muted">No school activity recorded in {stats.universityCode} yet.</p>
+            ) : (
+              <ul className="management-list">
+                {stats.schoolBreakdown.map((item) => (
+                  <li key={item.school}>
+                    <strong>{item.school}</strong>
+                    <span>
+                      {item.studentsCount} students · {item.coursesCount} course units · {item.examsCount} exams
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      )}
+
+      {tab === 'staff' && (
+        <div className="lecturer-management">
+          <section className="card">
+            <h2>Create School Admin</h2>
+            <p className="muted small">
+              Create a School Admin scoped to {identity?.university_code || 'your university'} and a specific school.
+            </p>
+            <form className="form" onSubmit={createSchoolAdmin}>
+              <label>Full name
+                <input required maxLength={100} value={schoolAdminForm.name}
+                  onChange={(event) => setSchoolAdminForm({ ...schoolAdminForm, name: event.target.value })} />
+              </label>
+              <label>Email
+                <input required type="email" autoComplete="email" maxLength={100}
+                  value={schoolAdminForm.email}
+                  onChange={(event) => setSchoolAdminForm({ ...schoolAdminForm, email: event.target.value })} />
+              </label>
+              <label>School
+                <select value={schoolAdminForm.school}
+                  onChange={(event) => setSchoolAdminForm({ ...schoolAdminForm, school: event.target.value })}>
+                  {SCHOOLS.map((school) => <option key={school} value={school}>{school}</option>)}
+                </select>
+              </label>
+              <label>Temporary password
+                <input required type="password" autoComplete="new-password" minLength={8}
+                  value={schoolAdminForm.password}
+                  onChange={(event) => setSchoolAdminForm({ ...schoolAdminForm, password: event.target.value })} />
+              </label>
+              <button className="btn primary" disabled={busyAction === 'school-admin'}>
+                {busyAction === 'school-admin' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create School Admin'}
+              </button>
+            </form>
+          </section>
+
+          <section className="card">
+            <h2>Create Examination Office Admin</h2>
+            <p className="muted small">
+              Create an Examination Officer for {identity?.university_code || 'your university'} to assign exam rooms, invigilators, and resolve malpractice cases.
+            </p>
+            <form className="form" onSubmit={createExamOfficer}>
+              <label>Full name
+                <input required maxLength={100} value={examOfficerForm.name}
+                  onChange={(event) => setExamOfficerForm({ ...examOfficerForm, name: event.target.value })} />
+              </label>
+              <label>Email
+                <input required type="email" autoComplete="email" maxLength={100}
+                  value={examOfficerForm.email}
+                  onChange={(event) => setExamOfficerForm({ ...examOfficerForm, email: event.target.value })} />
+              </label>
+              <label>Temporary password
+                <input required type="password" autoComplete="new-password" minLength={8}
+                  value={examOfficerForm.password}
+                  onChange={(event) => setExamOfficerForm({ ...examOfficerForm, password: event.target.value })} />
+              </label>
+              <button className="btn primary" disabled={busyAction === 'exam-officer'}>
+                {busyAction === 'exam-officer' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create Exam Officer'}
+              </button>
+            </form>
+          </section>
+
+          <section className="card lecturer-assignment-card">
+            <h2>All Staff in {identity?.university_code || 'University'} ({totalStaffCount})</h2>
+            <h3>Administrative Staff ({staff.admins?.length || 0})</h3>
+            {!staff.admins?.length ? (
+              <p className="muted">No School Admins, Exam Officers, or Coordinators created yet.</p>
+            ) : (
+              <ul className="management-list">
+                {staff.admins.map((member) => (
+                  <li key={`admin-${member.id}`}>
+                    <strong>{member.name || member.email}</strong>
+                    <span>
+                      {member.email} · {member.role === 'SCHOOL_ADMIN'
+                        ? `School Admin (${member.school})`
+                        : member.role === 'EXAM_OFFICER'
+                          ? 'Examination Office Admin (All Schools)'
+                          : `Coordinator (${member.school})`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            <h3 style={{ marginTop: 18 }}>Lecturers ({staff.lecturers?.length || 0})</h3>
+            {!staff.lecturers?.length ? (
+              <p className="muted">No lecturers created yet.</p>
+            ) : (
+              <ul className="management-list">
+                {staff.lecturers.map((lecturer) => (
+                  <li key={`lecturer-${lecturer.id}`}>
+                    <strong>{lecturer.name}</strong>
+                    <span>{lecturer.email} · Lecturer ({lecturer.school})</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function SchoolAdminApp({ onLogout }) {
+  const [adminIdentity, setAdminIdentity] = useState(null);
   const [units, setUnits] = useState([]);
   const [assignmentUnits, setAssignmentUnits] = useState([]);
   const [lecturers, setLecturers] = useState([]);
@@ -2364,6 +2894,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
   const [visibleLecturers, setVisibleLecturers] = useState([]);
   const [lecturerAssignments, setLecturerAssignments] = useState({});
   const [coordinatorAssignments, setCoordinatorAssignments] = useState({});
+  const [scheduleCoordinatorAssignments, setScheduleCoordinatorAssignments] = useState({});
   const [classes, setClasses] = useState([]);
   const [exams, setExams] = useState([]);
   const [students, setStudents] = useState([]);
@@ -2380,13 +2911,17 @@ function AdminApp({ onLogout, superAdmin = false }) {
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState('');
   const [editingClassId, setEditingClassId] = useState(null);
+  const [editingUnit, setEditingUnit] = useState(null);
+  const [unitEditForm, setUnitEditForm] = useState({
+    code: '', name: '', degreeProgram: '', academicLevel: 'Degree',
+    yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
+  });
   const [busyExamId, setBusyExamId] = useState(null);
   const [editingExam, setEditingExam] = useState(null);
   const [examEditForm, setExamEditForm] = useState({
     examDate: '', startTime: '', endTime: '', room: '', program: 'BOTH'
   });
   const [broadcastType, setBroadcastType] = useState('global');
-  const [broadcastSchool, setBroadcastSchool] = useState('SCI');
   const [broadcastTargetSchool, setBroadcastTargetSchool] = useState('ALL');
   const [broadcastDegree, setBroadcastDegree] = useState('BCS');
   const [broadcastProgram, setBroadcastProgram] = useState('DAY');
@@ -2400,23 +2935,25 @@ function AdminApp({ onLogout, superAdmin = false }) {
   const notify = useToast();
   const targetRoom = broadcastType === 'global'
     ? 'GLOBAL'
-    : `${superAdmin ? broadcastSchool : (adminIdentity?.school || broadcastSchool)}-${broadcastDegree}-${broadcastProgram}-Y${broadcastYear}-S${broadcastSemester}`;
-  const isSuperAdminUser = superAdmin || adminIdentity?.role === 'SUPER_ADMIN';
+    : `${adminIdentity?.school || 'SCI'}-${broadcastDegree}-${broadcastProgram}-Y${broadcastYear}-S${broadcastSemester}`;
   const [unitForm, setUnitForm] = useState({
-    code: '', name: '', school: 'SCI', degreeProgram: '', academicLevel: 'Degree',
+    code: '', name: '', degreeProgram: '', academicLevel: 'Degree',
     yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
   });
   const [lecturerForm, setLecturerForm] = useState({
-    name: '', email: '', password: '', school: 'SCI'
+    name: '', email: '', password: ''
+  });
+  const [coordinatorForm, setCoordinatorForm] = useState({
+    name: '', email: '', password: ''
   });
   const [classForm, setClassForm] = useState({
-    courseUnitId: '', lecturerId: '', dayOfWeek: 'Monday',
+    courseUnitId: '', lecturerId: '', coordinatorId: '', dayOfWeek: 'Monday',
     startTime: '', endTime: '', room: '', program: 'BOTH'
   });
   const selectedScheduleCourse = units.find((unit) => String(unit.id) === classForm.courseUnitId);
   const scheduleLecturers = selectedScheduleCourse
     ? lecturers.filter((lecturer) => lecturer.school === selectedScheduleCourse.school)
-    : [];
+    : lecturers;
   const [examForm, setExamForm] = useState({
     courseUnitIds: [], examDate: '', startTime: '', endTime: '', room: '', program: 'BOTH'
   });
@@ -2454,6 +2991,14 @@ function AdminApp({ onLogout, superAdmin = false }) {
       ));
       setCoordinatorAssignments(Object.fromEntries(
         availableUnits.map((unit) => [unit.id, unit.coordinatorId ? String(unit.coordinatorId) : ''])
+      ));
+      setScheduleCoordinatorAssignments(Object.fromEntries(
+        scheduledClasses.map((item) => [
+          item.id,
+          item.scheduleCoordinatorId
+            ? String(item.scheduleCoordinatorId)
+            : item.coordinatorId ? String(item.coordinatorId) : ''
+        ])
       ));
       setAvailableDegrees([...new Set([...DEGREE_PROGRAMS, ...chatOptions.degreePrograms])]);
     } catch (requestError) {
@@ -2534,15 +3079,6 @@ function AdminApp({ onLogout, superAdmin = false }) {
     };
   }, [tab, notify]);
 
-  useEffect(() => {
-    if (tab !== 'admins' || !isSuperAdminUser) return undefined;
-    let active = true;
-    api('/superadmin/admins')
-      .then((result) => { if (active) setManagedAdmins(result); })
-      .catch((error) => { if (active) notify(error.message || 'Could not load administrators.', 'error'); });
-    return () => { active = false; };
-  }, [tab, isSuperAdminUser, notify]);
-
   async function addUnit(event) {
     event.preventDefault();
     setBusyAction('unit');
@@ -2552,14 +3088,46 @@ function AdminApp({ onLogout, superAdmin = false }) {
         body: JSON.stringify(unitForm)
       });
       setUnitForm({
-        code: '', name: '', school: adminIdentity?.school || 'SCI',
-        degreeProgram: '', academicLevel: 'Degree',
+        code: '', name: '', degreeProgram: '', academicLevel: 'Degree',
         yearOfStudy: 1, semester: 1, lecturerId: '', isPublic: false
       });
       notify('Course unit added.');
       await load();
     } catch (requestError) {
       notify(requestError.message, 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
+  function startUnitEdit(unit) {
+    setEditingUnit(unit);
+    setUnitEditForm({
+      code: unit.code,
+      name: unit.name,
+      degreeProgram: unit.degreeProgram,
+      academicLevel: unit.academicLevel,
+      yearOfStudy: unit.yearOfStudy,
+      semester: unit.semester,
+      lecturerId: unit.lecturerId ? String(unit.lecturerId) : '',
+      isPublic: Boolean(unit.isPublic)
+    });
+  }
+
+  async function saveUnitEdit(event) {
+    event.preventDefault();
+    if (!editingUnit) return;
+    setBusyAction(`edit-unit-${editingUnit.id}`);
+    try {
+      await api(`/admin/course-units/${editingUnit.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(unitEditForm)
+      });
+      setEditingUnit(null);
+      notify('Course unit updated.');
+      await load();
+    } catch (error) {
+      notify(error.message || 'Could not update the course unit.', 'error');
     } finally {
       setBusyAction('');
     }
@@ -2573,7 +3141,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
         method: 'POST',
         body: JSON.stringify(lecturerForm)
       });
-      setLecturerForm({ name: '', email: '', password: '', school: 'SCI' });
+      setLecturerForm({ name: '', email: '', password: '' });
       notify('Lecturer account created.');
       await load();
     } catch (requestError) {
@@ -2583,26 +3151,19 @@ function AdminApp({ onLogout, superAdmin = false }) {
     }
   }
 
-  async function addSchoolAdmin(event) {
+  async function addCoordinatorAccount(event) {
     event.preventDefault();
-    setBusyAction('admin');
+    setBusyAction('create-coordinator');
     try {
-      await api('/superadmin/admins', {
+      await api('/schooladmin/create-coordinator', {
         method: 'POST',
-        body: JSON.stringify(adminForm)
+        body: JSON.stringify(coordinatorForm)
       });
-      setAdminForm({ email: '', password: '', school: 'SCI', role: 'SCHOOL_ADMIN' });
-      setManagedAdmins(await api('/superadmin/admins'));
-      if (adminForm.role === 'COORDINATOR') {
-        setCoordinators(await api('/admin/coordinators'));
-      }
-      notify(adminForm.role === 'COORDINATOR'
-        ? 'Lecture Coordinator account created.'
-        : adminForm.role === 'EXAM_OFFICER'
-          ? 'Examination Office account created.'
-          : 'School admin account created.');
+      setCoordinatorForm({ name: '', email: '', password: '' });
+      setCoordinators(await api('/admin/coordinators'));
+      notify('Lecture Coordinator account created.');
     } catch (requestError) {
-      notify(requestError.message || 'Could not create the account.', 'error');
+      notify(requestError.message || 'Could not create Lecture Coordinator.', 'error');
     } finally {
       setBusyAction('');
     }
@@ -2663,6 +3224,37 @@ function AdminApp({ onLogout, superAdmin = false }) {
     }
   }
 
+  async function assignScheduleCoordinator(classSession) {
+    const coordinatorId = scheduleCoordinatorAssignments[classSession.id] || null;
+    setBusyAction(`schedule-coordinator-${classSession.id}`);
+    try {
+      await api('/schooladmin/assign-coordinator', {
+        method: 'POST',
+        body: JSON.stringify({
+          classScheduleId: classSession.id,
+          coordinatorId: coordinatorId ? Number(coordinatorId) : null
+        })
+      });
+      const assigned = coordinators.find((item) => String(item.id) === String(coordinatorId));
+      setClasses((current) => current.map((item) =>
+        item.id === classSession.id
+          ? {
+            ...item,
+            coordinatorId: coordinatorId ? Number(coordinatorId) : null,
+            scheduleCoordinatorId: coordinatorId ? Number(coordinatorId) : null,
+            coordinatorName: assigned?.name || null,
+            coordinatorEmail: assigned?.email || null
+          }
+          : item
+      ));
+      notify(coordinatorId ? 'Coordinator assigned to lecture schedule.' : 'Coordinator unassigned from lecture schedule.');
+    } catch (error) {
+      notify(error.message || 'Could not assign coordinator to lecture.', 'error');
+    } finally {
+      setBusyAction('');
+    }
+  }
+
   async function addClass(event) {
     event.preventDefault();
     setBusyAction('class');
@@ -2672,11 +3264,12 @@ function AdminApp({ onLogout, superAdmin = false }) {
         body: JSON.stringify({
           ...classForm,
           courseUnitId: Number(classForm.courseUnitId),
-          lecturerId: Number(classForm.lecturerId)
+          lecturerId: Number(classForm.lecturerId),
+          coordinatorId: classForm.coordinatorId ? Number(classForm.coordinatorId) : null
         })
       });
       setClassForm({
-        courseUnitId: '', lecturerId: '', dayOfWeek: 'Monday',
+        courseUnitId: '', lecturerId: '', coordinatorId: '', dayOfWeek: 'Monday',
         startTime: '', endTime: '', room: '', program: 'BOTH'
       });
       notify(editingClassId ? 'Lecture schedule updated.' : 'Lecture scheduled.');
@@ -2694,6 +3287,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
     setClassForm({
       courseUnitId: String(classSession.courseUnitId),
       lecturerId: String(classSession.lecturerId || ''),
+      coordinatorId: classSession.scheduleCoordinatorId
+        ? String(classSession.scheduleCoordinatorId)
+        : classSession.coordinatorId ? String(classSession.coordinatorId) : '',
       dayOfWeek: classSession.dayOfWeek,
       startTime: formatTime(classSession.startTime),
       endTime: formatTime(classSession.endTime),
@@ -2706,7 +3302,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
   function cancelClassEdit() {
     setEditingClassId(null);
     setClassForm({
-      courseUnitId: '', lecturerId: '', dayOfWeek: 'Monday',
+      courseUnitId: '', lecturerId: '', coordinatorId: '', dayOfWeek: 'Monday',
       startTime: '', endTime: '', room: '', program: 'BOTH'
     });
   }
@@ -2802,7 +3398,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
       });
       setBroadcastText('');
       notify(broadcastTargetSchool === 'ALL'
-        ? 'Broadcast sent to the whole university.'
+        ? 'Broadcast sent to your university.'
         : `Broadcast sent to ${broadcastTargetSchool}.`);
       setBroadcasts(await api('/admin/broadcasts'));
     } catch (requestError) {
@@ -2817,86 +3413,26 @@ function AdminApp({ onLogout, superAdmin = false }) {
       <header className="topbar">
         <div>
           <div className="hello">
-            {isSuperAdminUser ? 'Super Admin Panel' : `Admin Panel — ${adminIdentity?.school || 'School'}`}
+            School Admin Panel — {adminIdentity?.school || 'School'}
           </div>
           <div className="muted small">
-            {isSuperAdminUser
-              ? 'University-wide management'
-              : `Managing ${adminIdentity?.school || 'your school'} data only`}
+            {adminIdentity?.university_code ? `${adminIdentity.university_code} · ` : ''}
+            Managing {adminIdentity?.school || 'your school'} data only
           </div>
         </div>
         <button type="button" className="btn ghost" onClick={onLogout}>Log out</button>
       </header>
-      <div className="tabs" role="tablist" aria-label="Admin sections">
-        {isSuperAdminUser && (
-          <button type="button" className={tab === 'admins' ? 'tab active' : 'tab'}
-            onClick={() => setTab('admins')}>Manage admins</button>
-        )}
+      <div className="tabs" role="tablist" aria-label="School Admin sections">
         <button type="button" className={tab === 'manage' ? 'tab active' : 'tab'} onClick={() => setTab('manage')}>Timetable management</button>
         <button type="button" className={tab === 'classes' ? 'tab active' : 'tab'} onClick={() => setTab('classes')}>Schedule lectures</button>
-        <button type="button" className={tab === 'lecturers' ? 'tab active' : 'tab'} onClick={() => setTab('lecturers')}>Manage lecturers</button>
+        <button type="button" className={tab === 'lecturers' ? 'tab active' : 'tab'} onClick={() => setTab('lecturers')}>Manage lecturers &amp; coordinators</button>
         <button type="button" className={tab === 'students' ? 'tab active' : 'tab'} onClick={() => setTab('students')}>Manage students</button>
         <button type="button" className={tab === 'chat' ? 'tab active' : 'tab'} onClick={() => setTab('chat')}>Chat &amp; Updates</button>
       </div>
-      {!isSuperAdminUser && (
-        <p className="school-scope-note">Showing {adminIdentity?.school || 'your school'} students, lecturers, courses, and exams only.</p>
-      )}
-      {loading && <div className="inline-loading"><span className="spinner" /> Loading admin data…</div>}
-
-      {tab === 'admins' && isSuperAdminUser && (
-        <div className="lecturer-management">
-          <section className="card">
-            <h2>Create an administrator account</h2>
-            <p className="muted small">Create school admins, Lecture Coordinators, or Examination Office accounts.</p>
-            <form className="form" onSubmit={addSchoolAdmin}>
-              <label>Email
-                <input required type="email" autoComplete="email" maxLength={100}
-                  value={adminForm.email}
-                  onChange={(event) => setAdminForm({ ...adminForm, email: event.target.value })} />
-              </label>
-              <label>Temporary password
-                <input required type="password" autoComplete="new-password" minLength={12}
-                  value={adminForm.password}
-                  onChange={(event) => setAdminForm({ ...adminForm, password: event.target.value })} />
-              </label>
-              <label>School
-                <select value={adminForm.school}
-                  onChange={(event) => setAdminForm({ ...adminForm, school: event.target.value })}>
-                  {SCHOOLS.map((school) => <option key={school} value={school}>{school}</option>)}
-                </select>
-              </label>
-              <label>Account role
-                <select value={adminForm.role}
-                  onChange={(event) => setAdminForm({ ...adminForm, role: event.target.value })}>
-                  <option value="SCHOOL_ADMIN">School admin</option>
-                  <option value="COORDINATOR">Lecture Coordinator</option>
-                  <option value="EXAM_OFFICER">Examination Office</option>
-                </select>
-              </label>
-              <button className="btn primary" disabled={busyAction === 'admin'}>
-                {busyAction === 'admin' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create account'}
-              </button>
-            </form>
-          </section>
-          <section className="card">
-            <h2>Administrators ({managedAdmins.length})</h2>
-            {!managedAdmins.length ? <p className="muted">No administrator accounts found.</p> : (
-              <ul className="management-list">
-                {managedAdmins.map((managedAdmin) => (
-                  <li key={managedAdmin.id}>
-                    <strong>{managedAdmin.email}</strong>
-                    <span>{managedAdmin.role === 'SUPER_ADMIN'
-                      ? 'Super Admin · All schools'
-                      : `${managedAdmin.role === 'COORDINATOR'
-                        ? 'Lecture Coordinator'
-                        : managedAdmin.role === 'EXAM_OFFICER' ? 'Examination Office' : 'School Admin'} · ${managedAdmin.school}`}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
-        </div>
-      )}
+      <p className="school-scope-note">
+        Showing {adminIdentity?.university_code || 'your university'} · {adminIdentity?.school || 'your school'} students, lecturers, courses, and exams only.
+      </p>
+      {loading && <div className="inline-loading"><span className="spinner" /> Loading school data…</div>}
 
       {tab === 'chat' && (
         <div className="admin-chat-layout">
@@ -2910,9 +3446,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
                   if (event.target.value === 'ALL') setBroadcastType('global');
                 }}>
                   <option value="ALL">Entire university</option>
-                  {isSuperAdminUser
-                    ? SCHOOLS.map((school) => <option key={school} value={school}>{school} only</option>)
-                    : adminIdentity?.school && <option value={adminIdentity.school}>{adminIdentity.school} only</option>}
+                  {adminIdentity?.school && <option value={adminIdentity.school}>{adminIdentity.school} only</option>}
                 </select>
               </label>
               <label>Target type
@@ -2924,13 +3458,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
 
               {broadcastType === 'specific' && (
                 <div className="broadcast-group-fields">
-                  {isSuperAdminUser ? (
-                    <label>School chat room
-                      <select value={broadcastSchool} onChange={(event) => setBroadcastSchool(event.target.value)}>
-                        {SCHOOLS.map((school) => <option key={school} value={school}>{school}</option>)}
-                      </select>
-                    </label>
-                  ) : <p className="muted small">Chat room: {adminIdentity?.school}</p>}
+                  <p className="muted small">Chat room: {adminIdentity?.school}</p>
                   <label>Degree program
                     <select value={broadcastDegree} onChange={(event) => setBroadcastDegree(event.target.value)}>
                       {availableDegrees.map((degree) => <option key={degree} value={degree}>{degree}</option>)}
@@ -2971,7 +3499,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
               <button type="submit" className="btn primary" disabled={broadcastBusy || !broadcastText.trim()}>
                 {broadcastBusy
                   ? <><span className="spinner spinner-light" /> Sending…</>
-                : broadcastTargetSchool === 'ALL' ? 'Send University Broadcast' : `Send ${broadcastTargetSchool} Broadcast`}
+                  : broadcastTargetSchool === 'ALL' ? 'Send University Broadcast' : `Send ${broadcastTargetSchool} Broadcast`}
               </button>
             </form>
           </section>
@@ -3022,18 +3550,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
                 <input required maxLength={20} placeholder="CSC1104" value={unitForm.code}
                   onChange={(event) => setUnitForm({ ...unitForm, code: event.target.value })} />
               </label>
-              {isSuperAdminUser ? (
-                <label>School
-                  <select value={unitForm.school}
-                    onChange={(event) => setUnitForm({ ...unitForm, school: event.target.value })}>
-                    {SCHOOLS.map((school) => <option key={school} value={school}>{school}</option>)}
-                  </select>
-                </label>
-              ) : (
-                <label>School
-                  <span className="readonly-school">{adminIdentity?.school || 'Your school'}</span>
-                </label>
-              )}
+              <label>School
+                <span className="readonly-school">{adminIdentity?.school || 'Your school'}</span>
+              </label>
             </div>
             <label>Degree program
               <input list="degree-program-options" required maxLength={30}
@@ -3157,7 +3676,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
         </section>
 
         <section className="card admin-exams">
-          <h2>Scheduled exams{!isSuperAdminUser ? ` — ${adminIdentity?.school || 'your school'} only` : ''} ({exams.length})</h2>
+          <h2>Scheduled exams — {adminIdentity?.school || 'your school'} only ({exams.length})</h2>
           <SearchBar value={examSearch} onChange={setExamSearch}
             placeholder="Search by course, room, or date…" label="Search scheduled exams" />
           {!exams.length && (examSearch ? noSearchResults(examSearch) : <p className="muted">No exams scheduled yet.</p>)}
@@ -3172,7 +3691,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
         <div className="lecturer-management">
           <section className="card">
             <h2>Create lecturer account</h2>
-            <p className="muted small">Lecturers can sign in after an administrator creates their account.</p>
+            <p className="muted small">Lecturers created here belong to {adminIdentity?.university_code || 'your university'} · {adminIdentity?.school || 'your school'}.</p>
             <form className="form" onSubmit={addLecturer}>
               <label>Full name
                 <input required maxLength={100} value={lecturerForm.name}
@@ -3188,20 +3707,42 @@ function AdminApp({ onLogout, superAdmin = false }) {
                   onChange={(event) => setLecturerForm({ ...lecturerForm, password: event.target.value })} />
               </label>
               <label>School
-                {isSuperAdminUser ? (
-                  <select value={lecturerForm.school}
-                    onChange={(event) => setLecturerForm({ ...lecturerForm, school: event.target.value })}>
-                    {SCHOOLS.map((school) => <option key={school} value={school}>{school}</option>)}
-                  </select>
-                ) : <span className="readonly-school">{adminIdentity?.school || 'Your school'}</span>}
+                <span className="readonly-school">{adminIdentity?.school || 'Your school'}</span>
               </label>
               <button className="btn primary" disabled={busyAction === 'lecturer'}>
                 {busyAction === 'lecturer' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create lecturer'}
               </button>
             </form>
           </section>
+
           <section className="card">
-            <h2>Lecturers{!isSuperAdminUser ? ` — ${adminIdentity?.school || 'your school'}` : ''} ({visibleLecturers.length})</h2>
+            <h2>Create Lecture Coordinator</h2>
+            <p className="muted small">Coordinators manage lecture room changes and attendance for {adminIdentity?.school || 'your school'}.</p>
+            <form className="form" onSubmit={addCoordinatorAccount}>
+              <label>Full name
+                <input required maxLength={100} value={coordinatorForm.name}
+                  onChange={(event) => setCoordinatorForm({ ...coordinatorForm, name: event.target.value })} />
+              </label>
+              <label>Email
+                <input required type="email" autoComplete="email" value={coordinatorForm.email}
+                  onChange={(event) => setCoordinatorForm({ ...coordinatorForm, email: event.target.value })} />
+              </label>
+              <label>Temporary password
+                <input required type="password" minLength={8} autoComplete="new-password"
+                  value={coordinatorForm.password}
+                  onChange={(event) => setCoordinatorForm({ ...coordinatorForm, password: event.target.value })} />
+              </label>
+              <label>School
+                <span className="readonly-school">{adminIdentity?.school || 'Your school'}</span>
+              </label>
+              <button className="btn primary" disabled={busyAction === 'create-coordinator'}>
+                {busyAction === 'create-coordinator' ? <><span className="spinner spinner-light" /> Creating…</> : 'Create coordinator'}
+              </button>
+            </form>
+          </section>
+
+          <section className="card">
+            <h2>Lecturers — {adminIdentity?.school || 'your school'} ({visibleLecturers.length})</h2>
             <SearchBar value={lecturerSearch} onChange={setLecturerSearch}
               placeholder="Search lecturer name or email…" label="Search lecturers" />
             {!visibleLecturers.length ? (
@@ -3218,10 +3759,11 @@ function AdminApp({ onLogout, superAdmin = false }) {
               </ul>
             )}
           </section>
+
           <section className="card lecturer-assignment-card">
-            <h2>Assign lecturers and Lecture Coordinators</h2>
+            <h2>Manage course units, lecturers &amp; coordinators</h2>
             <p className="muted small">
-              Assign a lecturer and one Lecture Coordinator to each course unit. Coordinators can confirm rooms, remind that unit’s lecturer, and take attendance.
+              Edit course units, or assign a default lecturer and Lecture Coordinator to each course unit.
             </p>
             {!units.length ? (
               <p className="muted">Create course units before assigning lecturers.</p>
@@ -3241,6 +3783,9 @@ function AdminApp({ onLogout, superAdmin = false }) {
                         {unit.school} · {unit.degreeProgram} · Year {unit.yearOfStudy} · Semester {unit.semester}
                       </span>
                     </div>
+                    <button type="button" className="btn ghost small" onClick={() => startUnitEdit(unit)}>
+                      Edit unit
+                    </button>
                     <label className="lecturer-assignment-select">
                       <span className="sr-only">Lecturer for {unit.code}</span>
                       <select
@@ -3277,7 +3822,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
                         <option value="">No coordinator assigned</option>
                         {coordinators.filter((item) => item.school === unit.school).map((coordinator) => (
                           <option key={coordinator.id} value={coordinator.id}>
-                            {coordinator.email} · {coordinator.school}
+                            {coordinator.name ? `${coordinator.name} (${coordinator.email})` : coordinator.email}
                           </option>
                         ))}
                       </select>
@@ -3300,7 +3845,7 @@ function AdminApp({ onLogout, superAdmin = false }) {
 
       {tab === 'students' && (
         <section className="card admin-students-card">
-          <h2>Students{!isSuperAdminUser ? ` — ${adminIdentity?.school || 'your school'} only` : ''} ({students.length})</h2>
+          <h2>Students — {adminIdentity?.school || 'your school'} only ({students.length})</h2>
           <SearchBar value={studentSearch} onChange={setStudentSearch}
             placeholder="Search name, student number, or program…" label="Search students" />
           {!students.length ? (
@@ -3333,7 +3878,8 @@ function AdminApp({ onLogout, superAdmin = false }) {
                     setClassForm({
                       ...classForm,
                       courseUnitId: event.target.value,
-                      lecturerId: selectedUnit?.lecturerId ? String(selectedUnit.lecturerId) : ''
+                      lecturerId: selectedUnit?.lecturerId ? String(selectedUnit.lecturerId) : '',
+                      coordinatorId: selectedUnit?.coordinatorId ? String(selectedUnit.coordinatorId) : ''
                     });
                   }}>
                   <option value="">Select a course unit</option>
@@ -3355,6 +3901,20 @@ function AdminApp({ onLogout, superAdmin = false }) {
                 </select>
                 {selectedScheduleCourse && !scheduleLecturers.length && (
                   <span className="muted small">Create a lecturer account for {selectedScheduleCourse.school} first.</span>
+                )}
+              </label>
+              <label>Coordinator (optional)
+                <select value={classForm.coordinatorId}
+                  onChange={(event) => setClassForm({ ...classForm, coordinatorId: event.target.value })}>
+                  <option value="">No coordinator assigned</option>
+                  {coordinators.map((coordinator) => (
+                    <option key={coordinator.id} value={coordinator.id}>
+                      {coordinator.name ? `${coordinator.name} (${coordinator.email})` : coordinator.email}
+                    </option>
+                  ))}
+                </select>
+                {!coordinators.length && (
+                  <span className="muted small">Create a Coordinator in Manage lecturers &amp; coordinators to assign one here.</span>
                 )}
               </label>
               <label>Day of week
@@ -3412,8 +3972,30 @@ function AdminApp({ onLogout, superAdmin = false }) {
                         <b className="lecture-lecturer">Lecturer: {classSession.lecturerName}</b>
                       )}
                       <span className="muted small">
-                        Target: {classSession.program === 'BOTH' ? 'All program modes' : classSession.program}
+                        Coordinator: {classSession.coordinatorName || classSession.coordinatorEmail || 'Not assigned'} · Target: {classSession.program === 'BOTH' ? 'All program modes' : classSession.program}
                       </span>
+                      <div className="lecture-coordinator-inline">
+                        <select
+                          aria-label={`Coordinator for ${classSession.code}`}
+                          value={scheduleCoordinatorAssignments[classSession.id] ?? ''}
+                          onChange={(event) => setScheduleCoordinatorAssignments((current) => ({
+                            ...current,
+                            [classSession.id]: event.target.value
+                          }))}
+                        >
+                          <option value="">No coordinator</option>
+                          {coordinators.map((coordinator) => (
+                            <option key={coordinator.id} value={coordinator.id}>
+                              {coordinator.name ? `${coordinator.name} (${coordinator.email})` : coordinator.email}
+                            </option>
+                          ))}
+                        </select>
+                        <button type="button" className="btn ghost small"
+                          onClick={() => assignScheduleCoordinator(classSession)}
+                          disabled={busyAction === `schedule-coordinator-${classSession.id}`}>
+                          {busyAction === `schedule-coordinator-${classSession.id}` ? 'Assigning…' : 'Assign coordinator'}
+                        </button>
+                      </div>
                     </div>
                     <div className="lecture-actions">
                       <button type="button" className="btn ghost small"
@@ -3444,6 +4026,70 @@ function AdminApp({ onLogout, superAdmin = false }) {
           </header>
           <ChatPanel key={targetRoom} admin targetRoom={targetRoom} fullPage />
         </section>
+      )}
+      {editingUnit && (
+        <Modal title="Edit course unit" onClose={() => setEditingUnit(null)} className="exam-edit-modal">
+          <h2>Edit course unit</h2>
+          <p className="muted small">{editingUnit.code} — {editingUnit.name}</p>
+          <form className="form" onSubmit={saveUnitEdit}>
+            <label>Code
+              <input required maxLength={20} value={unitEditForm.code}
+                onChange={(event) => setUnitEditForm({ ...unitEditForm, code: event.target.value })} />
+            </label>
+            <label>Name
+              <input required maxLength={120} value={unitEditForm.name}
+                onChange={(event) => setUnitEditForm({ ...unitEditForm, name: event.target.value })} />
+            </label>
+            <label>Degree program
+              <input required maxLength={30} value={unitEditForm.degreeProgram}
+                onChange={(event) => setUnitEditForm({ ...unitEditForm, degreeProgram: event.target.value })} />
+            </label>
+            <label>Academic level
+              <select required value={unitEditForm.academicLevel}
+                onChange={(event) => setUnitEditForm({ ...unitEditForm, academicLevel: event.target.value })}>
+                {ACADEMIC_LEVELS.map((level) => <option key={level} value={level}>{level}</option>)}
+              </select>
+            </label>
+            <div className="row">
+              <label>Year
+                <select value={unitEditForm.yearOfStudy}
+                  onChange={(event) => setUnitEditForm({ ...unitEditForm, yearOfStudy: Number(event.target.value) })}>
+                  {[1, 2, 3, 4, 5].map((year) => <option key={year} value={year}>Year {year}</option>)}
+                </select>
+              </label>
+              <label>Semester
+                <select value={unitEditForm.semester}
+                  onChange={(event) => setUnitEditForm({ ...unitEditForm, semester: Number(event.target.value) })}>
+                  <option value={1}>Semester 1</option>
+                  <option value={2}>Semester 2</option>
+                </select>
+              </label>
+            </div>
+            <label>Assign lecturer
+              <select value={unitEditForm.lecturerId}
+                onChange={(event) => setUnitEditForm({ ...unitEditForm, lecturerId: event.target.value })}>
+                <option value="">No lecturer assigned</option>
+                {lecturers.map((lecturer) => (
+                  <option key={lecturer.id} value={lecturer.id}>{lecturer.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="public-course-toggle">
+              <input type="checkbox" checked={unitEditForm.isPublic}
+                onChange={(event) => setUnitEditForm({ ...unitEditForm, isPublic: event.target.checked })} />
+              <span>
+                <strong>Make Public</strong>
+                <small>Visible to students from other schools.</small>
+              </span>
+            </label>
+            <div className="modal-actions">
+              <button type="button" className="btn ghost" onClick={() => setEditingUnit(null)}>Cancel</button>
+              <button type="submit" className="btn primary" disabled={busyAction === `edit-unit-${editingUnit.id}`}>
+                {busyAction === `edit-unit-${editingUnit.id}` ? 'Saving…' : 'Save changes'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       )}
       {editingExam && (
         <Modal title="Edit exam" onClose={() => setEditingExam(null)} className="exam-edit-modal">

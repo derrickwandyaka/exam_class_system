@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import multer from 'multer';
-import { createHash, randomInt, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'crypto';
 import { createRequire } from 'module';
 import { mkdir, open, unlink } from 'fs/promises';
 import path from 'path';
@@ -28,6 +28,8 @@ if (missingEnvironment.length) {
 const app = express();
 const port = Number(process.env.PORT || 5000);
 const schoolCodes = ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other'];
+const adminRoles = ['SUPER_ADMIN', 'UNIVERSITY_ADMIN', 'SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR'];
+const defaultUniversityCode = (process.env.DEFAULT_UNIVERSITY_CODE || 'NKUMBA').trim().toUpperCase();
 const jwtSecret = process.env.JWT_SECRET;
 const adminEmail = process.env.ADMIN_EMAIL.trim().toLowerCase();
 const adminPassword = process.env.ADMIN_PASSWORD;
@@ -102,6 +104,12 @@ function asyncRoute(handler) {
   };
 }
 
+function normalizeUniversityCode(value) {
+  if (typeof value !== 'string') return null;
+  const code = value.trim().toUpperCase();
+  return /^[A-Z0-9][A-Z0-9_-]{0,29}$/.test(code) ? code : null;
+}
+
 function auth(role) {
   return (req, res, next) => {
     const header = req.headers.authorization || '';
@@ -112,7 +120,7 @@ function auth(role) {
       const payload = jwt.verify(token, jwtSecret);
       const requestedRoles = Array.isArray(role) ? role : [role];
       const allowedRoles = requestedRoles.includes('admin')
-        ? [...requestedRoles, 'SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER']
+        ? [...requestedRoles, ...adminRoles]
         : requestedRoles;
       if (typeof payload === 'string' || !allowedRoles.includes(payload.role)) {
         return res.status(403).json({ error: 'Forbidden' });
@@ -120,10 +128,18 @@ function auth(role) {
       if (['student', 'lecturer'].includes(payload.role) && !Number.isInteger(payload.id)) {
         return res.status(401).json({ error: 'Invalid session' });
       }
-      if (['SUPER_ADMIN', 'SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER'].includes(payload.role) &&
-          (!Number.isInteger(payload.admin_id) ||
-           (payload.role !== 'SUPER_ADMIN' && !isOneOf(payload.school, schoolCodes)))) {
-        return res.status(401).json({ error: 'Invalid admin session' });
+      if (adminRoles.includes(payload.role)) {
+        if (!Number.isInteger(payload.admin_id)) {
+          return res.status(401).json({ error: 'Invalid admin session' });
+        }
+        if (['UNIVERSITY_ADMIN', 'EXAM_OFFICER'].includes(payload.role) &&
+            !normalizeUniversityCode(payload.university_code)) {
+          return res.status(401).json({ error: 'Invalid admin session' });
+        }
+        if (['SCHOOL_ADMIN', 'COORDINATOR'].includes(payload.role) &&
+            (!normalizeUniversityCode(payload.university_code) || !isOneOf(payload.school, schoolCodes))) {
+          return res.status(401).json({ error: 'Invalid admin session' });
+        }
       }
       req.user = payload;
       return next();
@@ -133,44 +149,69 @@ function auth(role) {
   };
 }
 
-function authSchoolAdmin(req, res, next) {
-  return auth(['SUPER_ADMIN', 'SCHOOL_ADMIN'])(req, res, next);
+function isSuperAdmin(req, res, next) {
+  return auth('SUPER_ADMIN')(req, res, next);
 }
 
-function authCoordinator(req, res, next) {
-  return auth('COORDINATOR')(req, res, next);
+function isUniAdmin(req, res, next) {
+  return auth('UNIVERSITY_ADMIN')(req, res, next);
 }
 
-function authExamOfficer(req, res, next) {
+function isSchoolAdmin(req, res, next) {
+  return auth('SCHOOL_ADMIN')(req, res, next);
+}
+
+function isExamOfficer(req, res, next) {
   return auth('EXAM_OFFICER')(req, res, next);
 }
 
-function isSuperAdmin(req) {
-  return req.user.role === 'SUPER_ADMIN';
+function isCoordinator(req, res, next) {
+  return auth('COORDINATOR')(req, res, next);
 }
 
-async function getCoordinatorSchedule(scheduleId, coordinatorId, school) {
+function hashApiKey(rawKey) {
+  return createHash('sha256').update(rawKey).digest('hex');
+}
+
+async function authenticateApiKey(req, res, next) {
+  const apiKey = typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
+  if (!apiKey) return res.status(401).json({ error: 'API key required' });
+  try {
+    const keyHash = hashApiKey(apiKey);
+    const [keys] = await pool.query(
+      'SELECT id, university_code AS universityCode, is_active AS isActive FROM api_keys WHERE key_hash = ?',
+      [keyHash]
+    );
+    if (!keys.length || !keys[0].isActive) {
+      return res.status(403).json({ error: 'Invalid or revoked API key' });
+    }
+    await pool.query('UPDATE api_keys SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?', [keys[0].id]);
+    req.apiKey = keys[0];
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+}
+
+async function getCoordinatorSchedule(scheduleId, coordinatorId, school, universityCode) {
   const [schedules] = await pool.query(
     `SELECT cs.id, cs.course_unit_id AS courseUnitId, cs.program,
             cs.day_of_week AS dayOfWeek, cs.start_time AS startTime, cs.end_time AS endTime,
             (cs.day_of_week = DAYNAME(CURDATE())) AS isToday,
-            cu.school, cu.academic_level AS academicLevel, cu.code, cu.name AS courseName,
+            cu.university_code AS universityCode, cu.school, cu.academic_level AS academicLevel,
+            cu.code, cu.name AS courseName,
             COALESCE(cs.lecturer_id, cu.lecturer_id) AS lecturerId,
             l.name AS lecturerName, l.email AS lecturerEmail
      FROM class_schedules cs
      JOIN course_units cu ON cu.id = cs.course_unit_id
      LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
-     WHERE cs.id = ? AND cu.coordinator_id = ? AND cu.school = ?`,
-    [scheduleId, coordinatorId, school]
+     WHERE cs.id = ?
+       AND COALESCE(cs.coordinator_id, cu.coordinator_id) = ?
+       AND cu.school = ?
+       AND cu.university_code = ?`,
+    [scheduleId, coordinatorId, school, universityCode]
   );
   return schedules[0] || null;
-}
-
-function adminSchoolFilter(req, column) {
-  return isSuperAdmin(req) ? { sql: '', params: [] } : {
-    sql: ` AND ${column} = ?`,
-    params: [req.user.school]
-  };
 }
 
 function isOneOf(value, values) {
@@ -226,9 +267,9 @@ async function sendPushToStudents(studentIds, payload) {
   }
 }
 
-async function getBroadcastStudentIds(targetRoom, targetSchool) {
-  const conditions = [];
-  const parameters = [];
+async function getBroadcastStudentIds(targetRoom, targetSchool, universityCode) {
+  const conditions = ['s.university_code = ?'];
+  const parameters = [universityCode];
   if (targetSchool !== 'ALL') {
     conditions.push('s.school = ?');
     parameters.push(targetSchool);
@@ -243,7 +284,7 @@ async function getBroadcastStudentIds(targetRoom, targetSchool) {
   }
   const [students] = await pool.query(
     `SELECT s.id FROM students s
-     ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+     WHERE ${conditions.join(' AND ')}
      ORDER BY s.id`,
     parameters
   );
@@ -252,7 +293,7 @@ async function getBroadcastStudentIds(targetRoom, targetSchool) {
 
 async function studentCanAccessCourseUnit(studentId, courseUnitId) {
   const [access] = await pool.query(
-    `SELECT cu.academic_level = s.academic_level AND (
+    `SELECT cu.university_code = s.university_code AND cu.academic_level = s.academic_level AND (
        (EXISTS (
          SELECT 1
          FROM registrations r
@@ -291,9 +332,67 @@ function formatMessages(messages) {
   }));
 }
 
+function signAdminToken(admin) {
+  return jwt.sign({
+    admin_id: admin.id,
+    name: admin.name || admin.email,
+    role: admin.role,
+    university_code: admin.university_code || null,
+    school: admin.school || null
+  }, jwtSecret, { expiresIn: '12h' });
+}
+
+function signStudentToken(student) {
+  return jwt.sign({
+    id: student.id,
+    role: 'student',
+    university_code: student.university_code || defaultUniversityCode,
+    name: `${student.first_name} ${student.last_name}`
+  }, jwtSecret, { expiresIn: '7d' });
+}
+
+function signLecturerToken(lecturer) {
+  return jwt.sign({
+    id: lecturer.id,
+    role: 'lecturer',
+    university_code: lecturer.university_code || defaultUniversityCode,
+    name: lecturer.name
+  }, jwtSecret, { expiresIn: '7d' });
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ ok: true });
 });
+
+app.get('/api/external/exams', authenticateApiKey, asyncRoute(async (req, res) => {
+  const universityCode = req.apiKey.universityCode || normalizeUniversityCode(req.query.universityCode);
+  const conditions = universityCode ? 'WHERE cu.university_code = ?' : '';
+  const params = universityCode ? [universityCode] : [];
+  const [exams] = await pool.query(
+    `SELECT e.id, cu.university_code AS universityCode, cu.school, cu.code, cu.name AS courseName,
+            e.exam_date AS examDate, e.start_time AS startTime, e.end_time AS endTime,
+            e.room, e.program, e.status
+     FROM exams e
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     ${conditions}
+     ORDER BY e.exam_date, e.start_time
+     LIMIT 500`,
+    params
+  );
+  return res.json(exams);
+}));
+
+app.get('/api/universities', asyncRoute(async (req, res) => {
+  const [rows] = await pool.query(
+    `SELECT university_code AS universityCode FROM admins WHERE university_code IS NOT NULL AND TRIM(university_code) <> ''
+     UNION
+     SELECT DISTINCT university_code AS universityCode FROM course_units WHERE TRIM(university_code) <> ''
+     ORDER BY universityCode`
+  );
+  const codes = rows.map((row) => row.universityCode);
+  if (!codes.length) codes.push(defaultUniversityCode);
+  return res.json(codes);
+}));
 
 app.get('/api/push/public-key', (req, res) => {
   if (!pushConfigured) {
@@ -304,17 +403,18 @@ app.get('/api/push/public-key', (req, res) => {
 
 app.get('/api/registration-programs', asyncRoute(async (req, res) => {
   const { school, academicLevel } = req.query;
+  const universityCode = normalizeUniversityCode(req.query.universityCode || defaultUniversityCode);
   const academicLevels = ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD'];
-  if (!isOneOf(school, schoolCodes) || !isOneOf(academicLevel, academicLevels)) {
-    return res.status(400).json({ error: 'Choose a valid school and academic level' });
+  if (!universityCode || !isOneOf(school, schoolCodes) || !isOneOf(academicLevel, academicLevels)) {
+    return res.status(400).json({ error: 'Choose a valid university, school, and academic level' });
   }
   const [programs] = await pool.query(
     `SELECT DISTINCT degree_program AS degreeProgram
      FROM course_units
-     WHERE school = ? AND academic_level = ?
+     WHERE university_code = ? AND school = ? AND academic_level = ?
        AND degree_program NOT IN ('ALL', 'UNASSIGNED')
      ORDER BY degree_program`,
-    [school, academicLevel]
+    [universityCode, school, academicLevel]
   );
   return res.json(programs.map((program) => program.degreeProgram));
 }));
@@ -379,9 +479,11 @@ app.post('/api/register', asyncRoute(async (req, res) => {
   const {
     firstName, lastName, studentNumber, program, school,
     degreeProgram: submittedDegreeProgram, yearOfStudy, semester, email, password,
-    phoneNumber: submittedPhoneNumber, academicLevel
+    phoneNumber: submittedPhoneNumber, academicLevel,
+    universityCode: submittedUniversityCode
   } = req.body;
   const degreeProgram = normalizeDegreeProgram(submittedDegreeProgram);
+  const universityCode = normalizeUniversityCode(submittedUniversityCode || defaultUniversityCode);
   const phoneNumber = typeof submittedPhoneNumber === 'string' ? submittedPhoneNumber.trim() : '';
 
   if (![firstName, lastName, studentNumber, email, password, phoneNumber].every(
@@ -394,20 +496,21 @@ app.post('/api/register', asyncRoute(async (req, res) => {
       phoneDigits.length < 7 || phoneDigits.length > 15) {
     return res.status(400).json({ error: 'Enter a valid phone number, including country code' });
   }
-  if (!isOneOf(academicLevel, ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD']) ||
+  if (!universityCode ||
+      !isOneOf(academicLevel, ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD']) ||
       !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE']) ||
       !isOneOf(school, schoolCodes) ||
       !Number.isInteger(Number(yearOfStudy)) || Number(yearOfStudy) < 1 || Number(yearOfStudy) > 5 ||
       !Number.isInteger(Number(semester)) || ![1, 2].includes(Number(semester)) ||
       !degreeProgram || password.length < 6) {
-    return res.status(400).json({ error: 'Check the academic level, degree program, study program, school, year, semester, and password' });
+    return res.status(400).json({ error: 'Check the university, academic level, degree program, study program, school, year, semester, and password' });
   }
 
   const [matchingPrograms] = await pool.query(
     `SELECT 1 FROM course_units
-     WHERE school = ? AND degree_program = ? AND academic_level = ?
+     WHERE university_code = ? AND school = ? AND degree_program = ? AND academic_level = ?
      LIMIT 1`,
-    [school, degreeProgram, academicLevel]
+    [universityCode, school, degreeProgram, academicLevel]
   );
   if (!matchingPrograms.length) {
     return res.status(400).json({ error: 'Select a degree program offered by the selected school' });
@@ -422,19 +525,20 @@ app.post('/api/register', asyncRoute(async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const [result] = await pool.query(
       `INSERT INTO students
-        (first_name, last_name, student_number, academic_level, program, school, phone_number, degree_program,
+        (first_name, last_name, student_number, academic_level, program, university_code, school, phone_number, degree_program,
          year_of_study, semester, email, password_hash)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        firstName.trim(), lastName.trim(), studentNumber.trim(), academicLevel, program, school, phoneNumber,
+        firstName.trim(), lastName.trim(), studentNumber.trim(), academicLevel, program, universityCode, school, phoneNumber,
         degreeProgram, Number(yearOfStudy), Number(semester), normalizedEmail, passwordHash
       ]
     );
-    const token = jwt.sign({
+    const token = signStudentToken({
       id: result.insertId,
-      role: 'student',
-      name: `${firstName.trim()} ${lastName.trim()}`
-    }, jwtSecret, { expiresIn: '7d' });
+      first_name: firstName.trim(),
+      last_name: lastName.trim(),
+      university_code: universityCode
+    });
     return res.status(201).json({ token });
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') {
@@ -448,17 +552,13 @@ app.post('/api/login', asyncRoute(async (req, res) => {
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   const [students] = await pool.query(
-    'SELECT id, first_name, last_name, password_hash FROM students WHERE email = ?',
+    'SELECT id, first_name, last_name, university_code, password_hash FROM students WHERE email = ?',
     [email]
   );
   if (!students.length || !(await bcrypt.compare(password, students[0].password_hash))) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
-  const token = jwt.sign({
-    id: students[0].id,
-    role: 'student',
-    name: `${students[0].first_name} ${students[0].last_name}`
-  }, jwtSecret, { expiresIn: '7d' });
+  const token = signStudentToken(students[0]);
   return res.json({ token });
 }));
 
@@ -466,17 +566,13 @@ app.post('/api/lecturer/login', asyncRoute(async (req, res) => {
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   const [lecturers] = await pool.query(
-    'SELECT id, name, password_hash FROM lecturers WHERE email = ?',
+    'SELECT id, name, university_code, password_hash FROM lecturers WHERE email = ?',
     [email]
   );
   if (!lecturers.length || !(await bcrypt.compare(password, lecturers[0].password_hash))) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
-  const token = jwt.sign({
-    id: lecturers[0].id,
-    role: 'lecturer',
-    name: lecturers[0].name
-  }, jwtSecret, { expiresIn: '7d' });
+  const token = signLecturerToken(lecturers[0]);
   return res.json({ token, role: 'lecturer' });
 }));
 
@@ -485,44 +581,38 @@ app.post('/api/sign-in', asyncRoute(async (req, res) => {
   const password = typeof req.body.password === 'string' ? req.body.password : '';
 
   const [admins] = await pool.query(
-    'SELECT id, email, password_hash, school, role FROM admins WHERE email = ?',
+    'SELECT id, name, email, password_hash, university_code, school, role FROM admins WHERE email = ?',
     [email]
   );
   if (admins.length && await bcrypt.compare(password, admins[0].password_hash)) {
     const admin = admins[0];
-    const token = jwt.sign({
-      admin_id: admin.id,
+    const token = signAdminToken(admin);
+    return res.json({
+      token,
       role: admin.role,
-      school: admin.school
-    }, jwtSecret, { expiresIn: '12h' });
-    return res.json({ token, role: admin.role });
+      university_code: admin.university_code || null,
+      school: admin.school || null,
+      name: admin.name || ''
+    });
   }
 
   const [students] = await pool.query(
-    'SELECT id, first_name, last_name, password_hash FROM students WHERE email = ?',
+    'SELECT id, first_name, last_name, university_code, password_hash FROM students WHERE email = ?',
     [email]
   );
   if (!students.length || !(await bcrypt.compare(password, students[0].password_hash))) {
     const [lecturers] = await pool.query(
-      'SELECT id, name, password_hash FROM lecturers WHERE email = ?',
+      'SELECT id, name, university_code, password_hash FROM lecturers WHERE email = ?',
       [email]
     );
     if (!lecturers.length || !(await bcrypt.compare(password, lecturers[0].password_hash))) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
-    const token = jwt.sign({
-      id: lecturers[0].id,
-      role: 'lecturer',
-      name: lecturers[0].name
-    }, jwtSecret, { expiresIn: '7d' });
+    const token = signLecturerToken(lecturers[0]);
     return res.json({ token, role: 'lecturer' });
   }
 
-  const token = jwt.sign({
-    id: students[0].id,
-    role: 'student',
-    name: `${students[0].first_name} ${students[0].last_name}`
-  }, jwtSecret, { expiresIn: '7d' });
+  const token = signStudentToken(students[0]);
   return res.json({ token, role: 'student' });
 }));
 
@@ -530,25 +620,28 @@ app.post('/api/admin/login', asyncRoute(async (req, res) => {
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   const [admins] = await pool.query(
-    'SELECT id, email, password_hash, school, role FROM admins WHERE email = ?',
+    'SELECT id, name, email, password_hash, university_code, school, role FROM admins WHERE email = ?',
     [email]
   );
   if (!admins.length || !(await bcrypt.compare(password, admins[0].password_hash))) {
     return res.status(401).json({ error: 'Invalid admin credentials' });
   }
   const admin = admins[0];
-  const token = jwt.sign({
-    admin_id: admin.id,
+  const token = signAdminToken(admin);
+  return res.json({
+    token,
     role: admin.role,
-    school: admin.school
-  }, jwtSecret, { expiresIn: '12h' });
-  return res.json({ token, role: admin.role });
+    university_code: admin.university_code || null,
+    school: admin.school || null,
+    name: admin.name || ''
+  });
 }));
 
 app.get('/api/me', auth('student'), asyncRoute(async (req, res) => {
   const [students] = await pool.query(
     `SELECT id, first_name AS firstName, last_name AS lastName, student_number AS studentNumber,
-            academic_level AS academicLevel, program, school, degree_program AS degreeProgram,
+            academic_level AS academicLevel, program, university_code AS universityCode,
+            school, degree_program AS degreeProgram,
             year_of_study AS yearOfStudy, semester, email,
             profile_picture AS profilePicture
      FROM students WHERE id = ?`,
@@ -634,7 +727,8 @@ app.get('/api/course-units', auth('student'), asyncRoute(async (req, res) => {
      JOIN students s ON s.id = ?
      LEFT JOIN registrations r
        ON r.course_unit_id = cu.id AND r.student_id = s.id
-     WHERE cu.academic_level = s.academic_level
+     WHERE cu.university_code = s.university_code
+       AND cu.academic_level = s.academic_level
        AND (cu.school = s.school OR cu.is_public = TRUE)
        ${searchFilter}
      ORDER BY cu.code, cu.year_of_study, cu.semester`,
@@ -682,15 +776,17 @@ app.get('/api/classes', auth('student'), asyncRoute(async (req, res) => {
   return res.json(classes);
 }));
 
-app.get('/api/coordinator/me', authCoordinator, (req, res) => {
+app.get('/api/coordinator/me', isCoordinator, (req, res) => {
   return res.json({
     id: req.user.admin_id,
+    name: req.user.name,
     role: req.user.role,
+    university_code: req.user.university_code,
     school: req.user.school
   });
 });
 
-app.get('/api/coordinator/lectures', authCoordinator, asyncRoute(async (req, res) => {
+app.get('/api/coordinator/lectures', isCoordinator, asyncRoute(async (req, res) => {
   const [lectures] = await pool.query(
     `SELECT cs.id, cu.code, cu.name AS courseName,
             cs.day_of_week AS dayOfWeek, cs.start_time AS startTime,
@@ -703,6 +799,7 @@ app.get('/api/coordinator/lectures', authCoordinator, asyncRoute(async (req, res
      LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
      LEFT JOIN registrations r ON r.course_unit_id = cu.id
      LEFT JOIN students s ON s.id = r.student_id
+       AND s.university_code = cu.university_code
        AND s.school = cu.school
        AND s.academic_level = cu.academic_level
        AND (cs.program = 'BOTH' OR cs.program = s.program)
@@ -710,22 +807,25 @@ app.get('/api/coordinator/lectures', authCoordinator, asyncRoute(async (req, res
        ON att.class_schedule_id = cs.id
        AND att.student_id = s.id
        AND att.date = CURDATE()
-     WHERE cu.coordinator_id = ? AND cu.school = ? AND cs.day_of_week = DAYNAME(CURDATE())
+     WHERE COALESCE(cs.coordinator_id, cu.coordinator_id) = ?
+       AND cu.school = ?
+       AND cu.university_code = ?
+       AND cs.day_of_week = DAYNAME(CURDATE())
      GROUP BY cs.id, cu.code, cu.name, cs.day_of_week, cs.start_time, cs.end_time,
               cs.room, cs.program, l.name, l.email
      ORDER BY cs.start_time, cu.code`,
-    [req.user.admin_id, req.user.school]
+    [req.user.admin_id, req.user.school, req.user.university_code]
   );
   return res.json(lectures);
 }));
 
-app.get('/api/coordinator/schedule/:id/students', authCoordinator, asyncRoute(async (req, res) => {
+app.get('/api/coordinator/schedule/:id/students', isCoordinator, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.params.id);
   if (!Number.isInteger(scheduleId) || scheduleId < 1) {
     return res.status(400).json({ error: 'Choose a valid class schedule' });
   }
-  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
-  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school, req.user.university_code);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned lectures' });
   if (!schedule.isToday) {
     return res.status(400).json({ error: 'Attendance can only be taken for today’s lectures' });
   }
@@ -738,27 +838,28 @@ app.get('/api/coordinator/schedule/:id/students', authCoordinator, asyncRoute(as
      LEFT JOIN attendance att
        ON att.class_schedule_id = ? AND att.student_id = s.id AND att.date = CURDATE()
      WHERE r.course_unit_id = ?
+       AND s.university_code = ?
        AND s.school = ?
        AND s.academic_level = ?
        AND (? = 'BOTH' OR s.program = ?)
      ORDER BY s.last_name, s.first_name, s.student_number`,
     [
-      scheduleId, schedule.courseUnitId, schedule.school, schedule.academicLevel,
+      scheduleId, schedule.courseUnitId, schedule.universityCode, schedule.school, schedule.academicLevel,
       schedule.program, schedule.program
     ]
   );
   return res.json(students);
 }));
 
-app.put('/api/coordinator/schedule/:id/room', authCoordinator, asyncRoute(async (req, res) => {
+app.put('/api/coordinator/schedule/:id/room', isCoordinator, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.params.id);
   const room = typeof req.body.room === 'string' ? req.body.room.trim() : '';
   if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
       !room || room.length > 50) {
     return res.status(400).json({ error: 'Enter a valid class schedule and room (up to 50 characters)' });
   }
-  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
-  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school, req.user.university_code);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned lectures' });
   const [previousRooms] = await pool.query(
     'SELECT room FROM class_schedules WHERE id = ?',
     [scheduleId]
@@ -778,11 +879,12 @@ app.put('/api/coordinator/schedule/:id/room', authCoordinator, asyncRoute(async 
      FROM registrations r
      JOIN students s ON s.id = r.student_id
      WHERE r.course_unit_id = ?
+       AND s.university_code = ?
        AND s.school = ?
        AND s.academic_level = ?
        AND (? = 'BOTH' OR s.program = ?)`,
     [
-      schedule.courseUnitId, schedule.school, schedule.academicLevel,
+      schedule.courseUnitId, schedule.universityCode, schedule.school, schedule.academicLevel,
       schedule.program, schedule.program
     ]
   );
@@ -794,13 +896,13 @@ app.put('/api/coordinator/schedule/:id/room', authCoordinator, asyncRoute(async 
   return res.json({ ok: true, room, previousRoom });
 }));
 
-app.post('/api/coordinator/schedule/:id/generate-code', authCoordinator, asyncRoute(async (req, res) => {
+app.post('/api/coordinator/schedule/:id/generate-code', isCoordinator, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.params.id);
   if (!Number.isInteger(scheduleId) || scheduleId < 1) {
     return res.status(400).json({ error: 'Choose a valid class schedule' });
   }
-  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
-  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school, req.user.university_code);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned lectures' });
   if (!schedule.isToday) {
     return res.status(400).json({ error: 'A check-in code can only be generated for today’s lectures' });
   }
@@ -815,13 +917,13 @@ app.post('/api/coordinator/schedule/:id/generate-code', authCoordinator, asyncRo
   return res.json({ code });
 }));
 
-app.post('/api/coordinator/schedule/:id/remind-lecturer', authCoordinator, asyncRoute(async (req, res) => {
+app.post('/api/coordinator/schedule/:id/remind-lecturer', isCoordinator, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.params.id);
   if (!Number.isInteger(scheduleId) || scheduleId < 1) {
     return res.status(400).json({ error: 'Choose a valid class schedule' });
   }
-  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
-  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school, req.user.university_code);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned lectures' });
   if (!schedule.lecturerId) return res.status(400).json({ error: 'Assign a lecturer to this course unit first' });
 
   const message = `${schedule.code} — ${schedule.courseName} is scheduled for ${schedule.dayOfWeek} at ${schedule.startTime} in ${schedule.room}.`;
@@ -834,7 +936,7 @@ app.post('/api/coordinator/schedule/:id/remind-lecturer', authCoordinator, async
   return res.status(201).json({ id: result.insertId, lecturerEmail: schedule.lecturerEmail });
 }));
 
-app.post('/api/coordinator/attendance', authCoordinator, asyncRoute(async (req, res) => {
+app.post('/api/coordinator/attendance', isCoordinator, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.body?.scheduleId);
   const students = req.body?.students;
   if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
@@ -855,8 +957,8 @@ app.post('/api/coordinator/attendance', authCoordinator, asyncRoute(async (req, 
     normalizedStudents.push({ studentId, status: student.status });
   }
 
-  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school);
-  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned course units' });
+  const schedule = await getCoordinatorSchedule(scheduleId, req.user.admin_id, req.user.school, req.user.university_code);
+  if (!schedule) return res.status(404).json({ error: 'Class schedule not found in your assigned lectures' });
   if (!schedule.isToday) {
     return res.status(400).json({ error: 'Attendance can only be taken for today’s lectures' });
   }
@@ -866,12 +968,13 @@ app.post('/api/coordinator/attendance', authCoordinator, asyncRoute(async (req, 
      FROM registrations r
      JOIN students s ON s.id = r.student_id
      WHERE r.course_unit_id = ?
+       AND s.university_code = ?
        AND s.school = ?
        AND s.academic_level = ?
        AND (? = 'BOTH' OR s.program = ?)
        AND s.id IN (?)`,
     [
-      schedule.courseUnitId, schedule.school, schedule.academicLevel,
+      schedule.courseUnitId, schedule.universityCode, schedule.school, schedule.academicLevel,
       schedule.program, schedule.program,
       normalizedStudents.map((student) => student.studentId)
     ]
@@ -918,6 +1021,7 @@ app.post('/api/student/check-in', auth('student'), asyncRoute(async (req, res) =
      JOIN registrations r ON r.course_unit_id = cu.id AND r.student_id = ?
      JOIN students s ON s.id = r.student_id
      WHERE cs.id = ?
+       AND cu.university_code = s.university_code
        AND cu.school = s.school
        AND cu.academic_level = s.academic_level
        AND (cs.program = 'BOTH' OR cs.program = s.program)
@@ -955,7 +1059,8 @@ app.post('/api/registrations', auth('student'), asyncRoute(async (req, res) => {
        SELECT s.id, cu.id
        FROM students s
        JOIN course_units cu
-         ON cu.academic_level = s.academic_level
+         ON cu.university_code = s.university_code
+         AND cu.academic_level = s.academic_level
          AND (cu.school = s.school OR cu.is_public = TRUE)
        WHERE s.id = ? AND cu.id = ?`,
       [req.user.id, courseUnitId]
@@ -1025,6 +1130,7 @@ app.get('/api/exams', auth('student'), asyncRoute(async (req, res) => {
      JOIN registrations r ON r.course_unit_id = cu.id
      JOIN students s ON s.id = r.student_id
      WHERE s.id = ?
+       AND cu.university_code = s.university_code
        AND cu.academic_level = s.academic_level
        AND (e.program IN ('BOTH', 'ALL') OR e.program = s.program)
        ${searchFilter}
@@ -1047,7 +1153,7 @@ app.get('/api/messages', auth('student'), asyncRoute(async (req, res) => {
     return res.status(400).json({ error: 'Choose a valid course chat' });
   }
   const [students] = await pool.query(
-    `SELECT school, degree_program AS degreeProgram, program,
+    `SELECT university_code AS universityCode, school, degree_program AS degreeProgram, program,
             year_of_study AS yearOfStudy, semester
      FROM students WHERE id = ?`,
     [req.user.id]
@@ -1070,19 +1176,20 @@ app.get('/api/messages', auth('student'), asyncRoute(async (req, res) => {
             s.phone_number AS senderPhoneNumber
      FROM messages m
      LEFT JOIN students s ON s.id = m.sender_id
-     WHERE ((? IS NULL AND m.course_unit_id IS NULL AND m.target_room IN (?, 'GLOBAL'))
+     WHERE m.university_code = ?
+       AND ((? IS NULL AND m.course_unit_id IS NULL AND m.target_room IN (?, 'GLOBAL'))
             OR m.course_unit_id = ?)
        AND m.target_school IN (?, 'ALL')
      ORDER BY m.created_at DESC, m.id DESC
      LIMIT 100`,
-    [courseUnitId, targetRoom, courseUnitId, students[0].school]
+    [students[0].universityCode, courseUnitId, targetRoom, courseUnitId, students[0].school]
   );
   return res.json(formatMessages(messages));
 }));
 
 app.get('/api/chat/unread', auth('student'), asyncRoute(async (req, res) => {
   const [students] = await pool.query(
-    `SELECT school, degree_program AS degreeProgram, program,
+    `SELECT university_code AS universityCode, school, degree_program AS degreeProgram, program,
             year_of_study AS yearOfStudy, semester
      FROM students WHERE id = ?`,
     [req.user.id]
@@ -1096,17 +1203,19 @@ app.get('/api/chat/unread', auth('student'), asyncRoute(async (req, res) => {
      LEFT JOIN chat_read_states rs
        ON rs.student_id = ? AND rs.room_key = 'general'
      WHERE m.course_unit_id IS NULL
+       AND m.university_code = ?
        AND m.target_room IN (?, 'GLOBAL')
        AND m.target_school IN (?, 'ALL')
        AND m.id > COALESCE(rs.last_read_message_id, 0)
        AND (m.sender_id IS NULL OR m.sender_id <> ?)`,
-    [req.user.id, getRoomId(student), student.school, req.user.id]
+    [req.user.id, student.universityCode, getRoomId(student), student.school, req.user.id]
   );
   const [courseCounts] = await pool.query(
     `SELECT cu.id AS courseUnitId, COUNT(m.id) AS unreadCount
      FROM registrations r
      JOIN students s ON s.id = r.student_id
      JOIN course_units cu ON cu.id = r.course_unit_id
+       AND cu.university_code = s.university_code
        AND cu.academic_level = s.academic_level
      LEFT JOIN chat_read_states rs
        ON rs.student_id = s.id AND rs.room_key = CONCAT('course:', cu.id)
@@ -1145,7 +1254,7 @@ app.post('/api/chat/read', auth('student'), asyncRoute(async (req, res) => {
   }
 
   const [students] = await pool.query(
-    `SELECT school, degree_program AS degreeProgram, program,
+    `SELECT university_code AS universityCode, school, degree_program AS degreeProgram, program,
             year_of_study AS yearOfStudy, semester
      FROM students WHERE id = ?`,
     [req.user.id]
@@ -1160,9 +1269,10 @@ app.post('/api/chat/read', auth('student'), asyncRoute(async (req, res) => {
       `SELECT COALESCE(MAX(id), 0) AS messageId
        FROM messages
        WHERE course_unit_id IS NULL
+         AND university_code = ?
          AND target_room IN (?, 'GLOBAL')
          AND target_school IN (?, 'ALL')`,
-      [getRoomId(student), student.school]
+      [student.universityCode, getRoomId(student), student.school]
     );
   } else {
     if (!(await studentCanAccessCourseUnit(req.user.id, courseUnitId))) {
@@ -1203,7 +1313,7 @@ app.post('/api/messages', auth('student'), asyncRoute(async (req, res) => {
   }
 
   const [students] = await pool.query(
-    `SELECT first_name, last_name, school, degree_program AS degreeProgram, program,
+    `SELECT first_name, last_name, university_code AS universityCode, school, degree_program AS degreeProgram, program,
             year_of_study AS yearOfStudy, semester
      FROM students WHERE id = ?`,
     [req.user.id]
@@ -1216,13 +1326,14 @@ app.post('/api/messages', auth('student'), asyncRoute(async (req, res) => {
   }
 
   const [result] = await pool.query(
-    `INSERT INTO messages (sender_id, sender_name, text, target_room, course_unit_id)
-     VALUES (?, ?, ?, ?, ?)`,
+    `INSERT INTO messages (sender_id, sender_name, text, target_room, university_code, course_unit_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
     [
       req.user.id,
       `${students[0].first_name} ${students[0].last_name}`,
       text,
       getRoomId(students[0]),
+      students[0].universityCode,
       courseUnitId
     ]
   );
@@ -1394,9 +1505,12 @@ app.get('/api/notes/:id/download', auth(['student', 'lecturer', 'admin']), async
     return res.status(400).json({ error: 'Choose a valid note' });
   }
   const [notes] = await pool.query(
-    `SELECT id, course_unit_id AS courseUnitId, lecturer_id AS lecturerId, file_path AS filePath,
-            title
-     FROM notes WHERE id = ?`,
+    `SELECT n.id, n.course_unit_id AS courseUnitId, n.lecturer_id AS lecturerId,
+            n.file_path AS filePath, n.title,
+            cu.university_code AS universityCode, cu.school
+     FROM notes n
+     JOIN course_units cu ON cu.id = n.course_unit_id
+     WHERE n.id = ?`,
     [noteId]
   );
   if (!notes.length) return res.status(404).json({ error: 'Note not found' });
@@ -1409,12 +1523,21 @@ app.get('/api/notes/:id/download', auth(['student', 'lecturer', 'admin']), async
     return res.status(403).json({ error: 'You are not assigned to this note' });
   } else if (req.user.role === 'COORDINATOR') {
     const [assignments] = await pool.query(
-      'SELECT id FROM course_units WHERE id = ? AND coordinator_id = ?',
+      `SELECT cu.id
+       FROM course_units cu
+       LEFT JOIN class_schedules cs ON cs.course_unit_id = cu.id
+       WHERE cu.id = ? AND COALESCE(cs.coordinator_id, cu.coordinator_id) = ?`,
       [note.courseUnitId, req.user.admin_id]
     );
     if (!assignments.length) {
       return res.status(403).json({ error: 'You are not assigned to this course unit' });
     }
+  } else if (['UNIVERSITY_ADMIN', 'EXAM_OFFICER'].includes(req.user.role) &&
+             note.universityCode !== req.user.university_code) {
+    return res.status(403).json({ error: 'Forbidden' });
+  } else if (req.user.role === 'SCHOOL_ADMIN' &&
+             (note.universityCode !== req.user.university_code || note.school !== req.user.school)) {
+    return res.status(403).json({ error: 'Forbidden' });
   }
 
   const fileName = path.basename(note.filePath);
@@ -1430,7 +1553,7 @@ app.get('/api/notes/:id/download', auth(['student', 'lecturer', 'admin']), async
 
 app.get('/api/lecturer/me', auth('lecturer'), asyncRoute(async (req, res) => {
   const [lecturers] = await pool.query(
-    'SELECT id, name, email, school FROM lecturers WHERE id = ?',
+    'SELECT id, name, email, university_code AS universityCode, school FROM lecturers WHERE id = ?',
     [req.user.id]
   );
   if (!lecturers.length) return res.status(404).json({ error: 'Lecturer account not found' });
@@ -1614,14 +1737,14 @@ app.post('/api/lecturer/messages', auth('lecturer'), asyncRoute(async (req, res)
     return res.status(400).json({ error: 'Choose a valid course chat' });
   }
   const [courses] = await pool.query(
-    'SELECT id FROM course_units WHERE id = ? AND lecturer_id = ?',
+    'SELECT id, university_code AS universityCode FROM course_units WHERE id = ? AND lecturer_id = ?',
     [courseUnitId, req.user.id]
   );
   if (!courses.length) return res.status(403).json({ error: 'You are not assigned to this course unit' });
   const [result] = await pool.query(
-    `INSERT INTO messages (sender_lecturer_id, sender_name, text, course_unit_id)
-     VALUES (?, ?, ?, ?)`,
-    [req.user.id, req.user.name, text, courseUnitId]
+    `INSERT INTO messages (sender_lecturer_id, sender_name, text, university_code, course_unit_id)
+     VALUES (?, ?, ?, ?, ?)`,
+    [req.user.id, req.user.name, text, courses[0].universityCode, courseUnitId]
   );
   return res.status(201).json({ id: result.insertId });
 }));
@@ -1695,42 +1818,65 @@ app.post('/api/lecturer/notes', auth('lecturer'), handleNoteUpload, asyncRoute(a
   }
 }));
 
-app.get('/api/admin/me', authSchoolAdmin, (req, res) => {
+app.get('/api/superadmin/me', isSuperAdmin, (req, res) => {
   return res.json({
     id: req.user.admin_id,
+    name: req.user.name,
     role: req.user.role,
-    school: req.user.school
+    university_code: null,
+    school: null
   });
 });
 
-app.get('/api/superadmin/admins', auth('SUPER_ADMIN'), asyncRoute(async (req, res) => {
+app.get('/api/superadmin/university-admins', isSuperAdmin, asyncRoute(async (req, res) => {
   const [admins] = await pool.query(
-    `SELECT id, email, school, role, created_at AS createdAt
+    `SELECT id, name, email, role, university_code AS universityCode, created_at AS createdAt
      FROM admins
-     ORDER BY role, school, email`
+     WHERE role = 'UNIVERSITY_ADMIN'
+     ORDER BY university_code, name, email`
   );
   return res.json(admins);
 }));
 
-app.post('/api/superadmin/admins', auth('SUPER_ADMIN'), asyncRoute(async (req, res) => {
+app.get('/api/superadmin/admins', isSuperAdmin, asyncRoute(async (req, res) => {
+  const [admins] = await pool.query(
+    `SELECT id, name, email, role, university_code AS universityCode, school, created_at AS createdAt
+     FROM admins
+     WHERE role = 'UNIVERSITY_ADMIN'
+     ORDER BY university_code, email`
+  );
+  return res.json(admins);
+}));
+
+app.post('/api/superadmin/create-university-admin', isSuperAdmin, asyncRoute(async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
-  const school = req.body.school;
-  const role = req.body.role || 'SCHOOL_ADMIN';
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
-      password.length < 12 || password.length > 200 ||
-      !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other']) ||
-      !isOneOf(role, ['SCHOOL_ADMIN', 'COORDINATOR', 'EXAM_OFFICER'])) {
-    return res.status(400).json({ error: 'Enter a valid email, school, and password (at least 12 characters)' });
+  const universityCode = normalizeUniversityCode(req.body.university_code ?? req.body.universityCode);
+
+  if (!name || name.length > 100 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
+      password.length < 8 || password.length > 200 ||
+      !universityCode) {
+    return res.status(400).json({
+      error: 'Enter a valid name, email, university code, and password (at least 8 characters)'
+    });
   }
+
   try {
     const passwordHash = await bcrypt.hash(password, 10);
     const [result] = await pool.query(
-      `INSERT INTO admins (email, password_hash, school, role)
-       VALUES (?, ?, ?, ?)`,
-      [email, passwordHash, school, role]
+      `INSERT INTO admins (name, email, password_hash, role, university_code, school)
+       VALUES (?, ?, ?, 'UNIVERSITY_ADMIN', ?, NULL)`,
+      [name, email, passwordHash, universityCode]
     );
-    return res.status(201).json({ id: result.insertId });
+    return res.status(201).json({
+      id: result.insertId,
+      name,
+      email,
+      role: 'UNIVERSITY_ADMIN',
+      universityCode
+    });
   } catch (error) {
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ error: 'An admin with that email already exists' });
@@ -1739,62 +1885,358 @@ app.post('/api/superadmin/admins', auth('SUPER_ADMIN'), asyncRoute(async (req, r
   }
 }));
 
-app.get('/api/admin/lecturers', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.get('/api/superadmin/api-keys', isSuperAdmin, asyncRoute(async (req, res) => {
+  const [keys] = await pool.query(
+    `SELECT id, name, university_code AS universityCode, key_prefix AS keyPrefix,
+            is_active AS isActive, created_at AS createdAt, last_used_at AS lastUsedAt
+     FROM api_keys
+     ORDER BY created_at DESC, id DESC`
+  );
+  return res.json(keys.map((key) => ({ ...key, isActive: Boolean(key.isActive) })));
+}));
+
+app.post('/api/superadmin/api-keys', isSuperAdmin, asyncRoute(async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const rawUniversityCode = req.body.universityCode ?? req.body.university_code;
+  const universityCode = rawUniversityCode === undefined || rawUniversityCode === null || String(rawUniversityCode).trim() === ''
+    ? null
+    : normalizeUniversityCode(String(rawUniversityCode));
+
+  if (!name || name.length > 100 || (rawUniversityCode && !universityCode)) {
+    return res.status(400).json({ error: 'Enter a valid API key label and optional university code' });
+  }
+
+  const rawKey = `upk_${randomBytes(24).toString('hex')}`;
+  const keyPrefix = rawKey.slice(0, 12);
+  const keyHash = hashApiKey(rawKey);
+  const [result] = await pool.query(
+    `INSERT INTO api_keys (name, university_code, key_prefix, key_hash, created_by)
+     VALUES (?, ?, ?, ?, ?)`,
+    [name, universityCode, keyPrefix, keyHash, req.user.admin_id]
+  );
+  return res.status(201).json({
+    id: result.insertId,
+    name,
+    universityCode,
+    keyPrefix,
+    apiKey: rawKey,
+    isActive: true
+  });
+}));
+
+app.delete('/api/superadmin/api-keys/:id', isSuperAdmin, asyncRoute(async (req, res) => {
+  const keyId = Number(req.params.id);
+  if (!Number.isInteger(keyId) || keyId < 1) {
+    return res.status(400).json({ error: 'Choose a valid API key' });
+  }
+  const [result] = await pool.query('DELETE FROM api_keys WHERE id = ?', [keyId]);
+  if (!result.affectedRows) return res.status(404).json({ error: 'API key not found' });
+  return res.json({ ok: true });
+}));
+
+app.get('/api/uniadmin/me', isUniAdmin, (req, res) => {
+  return res.json({
+    id: req.user.admin_id,
+    name: req.user.name,
+    role: req.user.role,
+    university_code: req.user.university_code,
+    school: null
+  });
+});
+
+app.get('/api/uniadmin/stats', isUniAdmin, asyncRoute(async (req, res) => {
+  const universityCode = req.user.university_code;
+  const [
+    [studentRows],
+    [lecturerRows],
+    [courseRows],
+    [classRows],
+    [examRows],
+    [caseRows],
+    [adminRoleRows],
+    [schoolRows]
+  ] = await Promise.all([
+    pool.query('SELECT COUNT(*) AS count FROM students WHERE university_code = ?', [universityCode]),
+    pool.query('SELECT COUNT(*) AS count FROM lecturers WHERE university_code = ?', [universityCode]),
+    pool.query('SELECT COUNT(*) AS count FROM course_units WHERE university_code = ?', [universityCode]),
+    pool.query(
+      `SELECT COUNT(*) AS count
+       FROM class_schedules cs
+       JOIN course_units cu ON cu.id = cs.course_unit_id
+       WHERE cu.university_code = ?`,
+      [universityCode]
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS count
+       FROM exams e
+       JOIN course_units cu ON cu.id = e.course_unit_id
+       WHERE cu.university_code = ?`,
+      [universityCode]
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS count
+       FROM malpractice_cases mc
+       JOIN exams e ON e.id = mc.exam_id
+       JOIN course_units cu ON cu.id = e.course_unit_id
+       WHERE cu.university_code = ? AND mc.status = 'PENDING'`,
+      [universityCode]
+    ),
+    pool.query(
+      `SELECT role, COUNT(*) AS count
+       FROM admins
+       WHERE university_code = ? AND role IN ('SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR')
+       GROUP BY role`,
+      [universityCode]
+    ),
+    pool.query(
+      `SELECT s.school,
+              COUNT(DISTINCT s.id) AS studentsCount,
+              COUNT(DISTINCT cu.id) AS coursesCount,
+              COUNT(DISTINCT e.id) AS examsCount
+       FROM (
+         SELECT school FROM students WHERE university_code = ?
+         UNION
+         SELECT school FROM course_units WHERE university_code = ?
+       ) schools
+       LEFT JOIN students s ON s.university_code = ? AND s.school = schools.school
+       LEFT JOIN course_units cu ON cu.university_code = ? AND cu.school = schools.school
+       LEFT JOIN exams e ON e.course_unit_id = cu.id
+       GROUP BY s.school, schools.school
+       ORDER BY schools.school`,
+      [universityCode, universityCode, universityCode, universityCode]
+    )
+  ]);
+
+  const roleCounts = Object.fromEntries(adminRoleRows.map((row) => [row.role, Number(row.count)]));
+  return res.json({
+    universityCode,
+    studentsCount: Number(studentRows[0].count),
+    lecturersCount: Number(lecturerRows[0].count),
+    courseUnitsCount: Number(courseRows[0].count),
+    classSchedulesCount: Number(classRows[0].count),
+    examsCount: Number(examRows[0].count),
+    pendingMalpracticeCasesCount: Number(caseRows[0].count),
+    schoolAdminsCount: roleCounts.SCHOOL_ADMIN || 0,
+    examOfficersCount: roleCounts.EXAM_OFFICER || 0,
+    coordinatorsCount: roleCounts.COORDINATOR || 0,
+    schoolBreakdown: schoolRows
+      .filter((row) => row.school)
+      .map((row) => ({
+        school: row.school,
+        studentsCount: Number(row.studentsCount),
+        coursesCount: Number(row.coursesCount),
+        examsCount: Number(row.examsCount)
+      }))
+  });
+}));
+
+app.get('/api/uniadmin/staff', isUniAdmin, asyncRoute(async (req, res) => {
+  const universityCode = req.user.university_code;
+  const [[admins], [lecturers]] = await Promise.all([
+    pool.query(
+      `SELECT id, name, email, role, university_code AS universityCode, school, created_at AS createdAt
+       FROM admins
+       WHERE university_code = ? AND role IN ('SCHOOL_ADMIN', 'EXAM_OFFICER', 'COORDINATOR')
+       ORDER BY role, school, name, email`,
+      [universityCode]
+    ),
+    pool.query(
+      `SELECT id, name, email, university_code AS universityCode, school, created_at AS createdAt
+       FROM lecturers
+       WHERE university_code = ?
+       ORDER BY school, name`,
+      [universityCode]
+    )
+  ]);
+  return res.json({ admins, lecturers });
+}));
+
+app.post('/api/uniadmin/create-school-admin', isUniAdmin, asyncRoute(async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const school = req.body.school;
+  const universityCode = req.user.university_code;
+
+  if (!name || name.length > 100 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
+      password.length < 8 || password.length > 200 ||
+      !isOneOf(school, schoolCodes)) {
+    return res.status(400).json({
+      error: 'Enter a valid name, email, school, and password (at least 8 characters)'
+    });
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      `INSERT INTO admins (name, email, password_hash, role, university_code, school)
+       VALUES (?, ?, ?, 'SCHOOL_ADMIN', ?, ?)`,
+      [name, email, passwordHash, universityCode, school]
+    );
+    return res.status(201).json({
+      id: result.insertId,
+      name,
+      email,
+      role: 'SCHOOL_ADMIN',
+      universityCode,
+      school
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'An admin with that email already exists' });
+    }
+    throw error;
+  }
+}));
+
+app.post('/api/uniadmin/create-exam-officer', isUniAdmin, asyncRoute(async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const universityCode = req.user.university_code;
+
+  if (!name || name.length > 100 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
+      password.length < 8 || password.length > 200) {
+    return res.status(400).json({
+      error: 'Enter a valid name, email, and password (at least 8 characters)'
+    });
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      `INSERT INTO admins (name, email, password_hash, role, university_code, school)
+       VALUES (?, ?, ?, 'EXAM_OFFICER', ?, NULL)`,
+      [name, email, passwordHash, universityCode]
+    );
+    return res.status(201).json({
+      id: result.insertId,
+      name,
+      email,
+      role: 'EXAM_OFFICER',
+      universityCode,
+      school: null
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'An admin with that email already exists' });
+    }
+    throw error;
+  }
+}));
+
+app.get('/api/admin/me', isSchoolAdmin, (req, res) => {
+  return res.json({
+    id: req.user.admin_id,
+    name: req.user.name,
+    role: req.user.role,
+    university_code: req.user.university_code,
+    school: req.user.school
+  });
+});
+
+app.get('/api/schooladmin/me', isSchoolAdmin, (req, res) => {
+  return res.json({
+    id: req.user.admin_id,
+    name: req.user.name,
+    role: req.user.role,
+    university_code: req.user.university_code,
+    school: req.user.school
+  });
+});
+
+app.get('/api/admin/lecturers', isSchoolAdmin, asyncRoute(async (req, res) => {
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   if (req.query.search !== undefined && typeof req.query.search !== 'string') {
     return res.status(400).json({ error: 'Search must be a single text value' });
   }
   if (search.length > 100) return res.status(400).json({ error: 'Search must be 100 characters or fewer' });
-  const scopeFilter = adminSchoolFilter(req, 'l.school');
-  const searchFilter = search
-    ? `WHERE (l.name LIKE ? OR l.email LIKE ?)${scopeFilter.sql}`
-    : scopeFilter.sql ? `WHERE ${scopeFilter.sql.trim().replace(/^AND /, '')}` : '';
+  const searchFilter = search ? 'AND (l.name LIKE ? OR l.email LIKE ?)' : '';
   const searchPattern = `%${search}%`;
   const [lecturers] = await pool.query(
-    `SELECT l.id, l.name, l.email, l.school,
+    `SELECT l.id, l.name, l.email, l.school, l.university_code AS universityCode,
             COUNT(cu.id) AS courseCount
      FROM lecturers l
      LEFT JOIN course_units cu ON cu.lecturer_id = l.id
-       ${isSuperAdmin(req) ? '' : 'AND cu.school = ?'}
-     ${searchFilter}
+       AND cu.university_code = ? AND cu.school = ?
+     WHERE l.university_code = ? AND l.school = ?
+       ${searchFilter}
      GROUP BY l.id
      ORDER BY l.name`,
     [
-      ...(!isSuperAdmin(req) ? [req.user.school] : []),
-      ...(search ? [searchPattern, searchPattern] : []),
-      ...scopeFilter.params
+      req.user.university_code,
+      req.user.school,
+      req.user.university_code,
+      req.user.school,
+      ...(search ? [searchPattern, searchPattern] : [])
     ]
   );
   return res.json(lecturers);
 }));
 
-app.get('/api/admin/coordinators', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.get('/api/admin/coordinators', isSchoolAdmin, asyncRoute(async (req, res) => {
   const [coordinators] = await pool.query(
-    `SELECT id, email, school
+    `SELECT id, name, email, school, university_code AS universityCode
      FROM admins
-     WHERE role = 'COORDINATOR'${isSuperAdmin(req) ? '' : ' AND school = ?'}
-     ORDER BY school, email`,
-    isSuperAdmin(req) ? [] : [req.user.school]
+     WHERE role = 'COORDINATOR' AND university_code = ? AND school = ?
+     ORDER BY name, email`,
+    [req.user.university_code, req.user.school]
   );
   return res.json(coordinators);
 }));
 
-app.post('/api/admin/lecturers', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.post('/api/schooladmin/create-coordinator', isSchoolAdmin, asyncRoute(async (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
-  const school = isSuperAdmin(req) ? req.body.school : req.user.school;
   if (!name || name.length > 100 ||
       !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
-      password.length < 8 || password.length > 200 ||
-      !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other'])) {
-    return res.status(400).json({ error: 'Enter a valid name, email, school, and password (at least 8 characters)' });
+      password.length < 8 || password.length > 200) {
+    return res.status(400).json({
+      error: 'Enter a valid name, email, and password (at least 8 characters)'
+    });
   }
   try {
     const passwordHash = await bcrypt.hash(password, 10);
     const [result] = await pool.query(
-      'INSERT INTO lecturers (name, email, password_hash, school) VALUES (?, ?, ?, ?)',
-      [name, email, passwordHash, school]
+      `INSERT INTO admins (name, email, password_hash, role, university_code, school)
+       VALUES (?, ?, ?, 'COORDINATOR', ?, ?)`,
+      [name, email, passwordHash, req.user.university_code, req.user.school]
+    );
+    return res.status(201).json({
+      id: result.insertId,
+      name,
+      email,
+      role: 'COORDINATOR',
+      universityCode: req.user.university_code,
+      school: req.user.school
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'An admin with that email already exists' });
+    }
+    throw error;
+  }
+}));
+
+app.post('/api/admin/lecturers', isSchoolAdmin, asyncRoute(async (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = typeof req.body.password === 'string' ? req.body.password : '';
+  const school = req.user.school;
+  const universityCode = req.user.university_code;
+  if (!name || name.length > 100 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 100 ||
+      password.length < 8 || password.length > 200) {
+    return res.status(400).json({ error: 'Enter a valid name, email, and password (at least 8 characters)' });
+  }
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      'INSERT INTO lecturers (name, email, password_hash, university_code, school) VALUES (?, ?, ?, ?, ?)',
+      [name, email, passwordHash, universityCode, school]
     );
     return res.status(201).json({ id: result.insertId });
   } catch (error) {
@@ -1805,31 +2247,40 @@ app.post('/api/admin/lecturers', authSchoolAdmin, asyncRoute(async (req, res) =>
   }
 }));
 
-app.get('/api/admin/classes', authSchoolAdmin, asyncRoute(async (req, res) => {
-  const scopeFilter = adminSchoolFilter(req, 'cu.school');
+app.get('/api/admin/classes', isSchoolAdmin, asyncRoute(async (req, res) => {
   const [classes] = await pool.query(
     `SELECT cs.id, cs.course_unit_id AS courseUnitId, cu.code, cu.name AS courseName,
-            COALESCE(cs.lecturer_id, cu.lecturer_id) AS lecturerId, cs.program,
+            COALESCE(cs.lecturer_id, cu.lecturer_id) AS lecturerId,
+            COALESCE(cs.coordinator_id, cu.coordinator_id) AS coordinatorId,
+            cs.coordinator_id AS scheduleCoordinatorId,
+            cs.program,
             cs.day_of_week AS dayOfWeek, cs.start_time AS startTime,
-            cs.end_time AS endTime, cs.room, l.name AS lecturerName
+            cs.end_time AS endTime, cs.room, l.name AS lecturerName,
+            COALESCE(ca.name, cua.name) AS coordinatorName,
+            COALESCE(ca.email, cua.email) AS coordinatorEmail
      FROM class_schedules cs
      JOIN course_units cu ON cu.id = cs.course_unit_id
      LEFT JOIN lecturers l ON l.id = COALESCE(cs.lecturer_id, cu.lecturer_id)
-     WHERE 1 = 1${scopeFilter.sql}
+     LEFT JOIN admins ca ON ca.id = cs.coordinator_id
+     LEFT JOIN admins cua ON cua.id = cu.coordinator_id
+     WHERE cu.university_code = ? AND cu.school = ?
      ORDER BY FIELD(cs.day_of_week, 'Monday', 'Tuesday', 'Wednesday', 'Thursday',
-                    'Friday', 'Saturday', 'Sunday'), cs.start_time, cu.code`
-    , scopeFilter.params
+                    'Friday', 'Saturday', 'Sunday'), cs.start_time, cu.code`,
+    [req.user.university_code, req.user.school]
   );
   return res.json(classes);
 }));
 
-app.post('/api/admin/classes', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.post('/api/admin/classes', isSchoolAdmin, asyncRoute(async (req, res) => {
   const courseUnitId = Number(req.body.courseUnitId);
   const lecturerId = Number(req.body.lecturerId);
+  const coordinatorId = req.body.coordinatorId === '' || req.body.coordinatorId === null ||
+    req.body.coordinatorId === undefined ? null : Number(req.body.coordinatorId);
   const { dayOfWeek, startTime, endTime, room, program = 'BOTH' } = req.body;
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   if (!Number.isInteger(courseUnitId) || courseUnitId < 1 ||
       !Number.isInteger(lecturerId) || lecturerId < 1 ||
+      (coordinatorId !== null && (!Number.isInteger(coordinatorId) || coordinatorId < 1)) ||
       !isOneOf(dayOfWeek, days) ||
       typeof startTime !== 'string' || !/^\d{2}:\d{2}$/.test(startTime) ||
       typeof endTime !== 'string' || !/^\d{2}:\d{2}$/.test(endTime) ||
@@ -1837,36 +2288,48 @@ app.post('/api/admin/classes', authSchoolAdmin, asyncRoute(async (req, res) => {
       !isOneOf(program, ['DAY', 'WEEKEND', 'EVENING', 'DISTANCE', 'BOTH'])) {
     return res.status(400).json({ error: 'Enter a valid course, lecturer, day, time range, room, and program' });
   }
-  const schoolScope = isSuperAdmin(req) ? '' : ' AND cu.school = ?';
   const [matchingCourse] = await pool.query(
     `SELECT cu.id FROM course_units cu
-     JOIN lecturers l ON l.id = ? AND l.school = cu.school
-     WHERE cu.id = ?${schoolScope}`,
-    [lecturerId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+     JOIN lecturers l ON l.id = ? AND l.university_code = cu.university_code AND l.school = cu.school
+     WHERE cu.id = ? AND cu.university_code = ? AND cu.school = ?`,
+    [lecturerId, courseUnitId, req.user.university_code, req.user.school]
   );
   if (!matchingCourse.length) {
-    return res.status(400).json({ error: 'Choose a lecturer from the course unit’s school' });
+    return res.status(400).json({ error: 'Choose a course unit and lecturer from your university and school' });
+  }
+  if (coordinatorId !== null) {
+    const [coordinators] = await pool.query(
+      `SELECT id FROM admins
+       WHERE id = ? AND role = 'COORDINATOR' AND university_code = ? AND school = ?`,
+      [coordinatorId, req.user.university_code, req.user.school]
+    );
+    if (!coordinators.length) {
+      return res.status(400).json({ error: 'Choose a Lecture Coordinator from your university and school' });
+    }
   }
   const [result] = await pool.query(
     `INSERT INTO class_schedules
-       (course_unit_id, lecturer_id, day_of_week, start_time, end_time, room, program)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       (course_unit_id, lecturer_id, coordinator_id, day_of_week, start_time, end_time, room, program)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      courseUnitId, lecturerId, dayOfWeek, `${startTime}:00`, `${endTime}:00`, room.trim(), program
+      courseUnitId, lecturerId, coordinatorId, dayOfWeek, `${startTime}:00`, `${endTime}:00`, room.trim(), program
     ]
   );
   return res.status(201).json({ id: result.insertId });
 }));
 
-app.put('/api/admin/classes/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.put('/api/admin/classes/:id', isSchoolAdmin, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.params.id);
   const courseUnitId = Number(req.body.courseUnitId);
   const lecturerId = Number(req.body.lecturerId);
+  const coordinatorId = req.body.coordinatorId === '' || req.body.coordinatorId === null ||
+    req.body.coordinatorId === undefined ? null : Number(req.body.coordinatorId);
   const { dayOfWeek, startTime, endTime, room, program } = req.body;
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
   if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
       !Number.isInteger(courseUnitId) || courseUnitId < 1 ||
       !Number.isInteger(lecturerId) || lecturerId < 1 ||
+      (coordinatorId !== null && (!Number.isInteger(coordinatorId) || coordinatorId < 1)) ||
       !isOneOf(dayOfWeek, days) ||
       typeof startTime !== 'string' || !/^\d{2}:\d{2}$/.test(startTime) ||
       typeof endTime !== 'string' || !/^\d{2}:\d{2}$/.test(endTime) ||
@@ -1875,60 +2338,109 @@ app.put('/api/admin/classes/:id', authSchoolAdmin, asyncRoute(async (req, res) =
     return res.status(400).json({ error: 'Enter a valid course, lecturer, day, time range, room, and program' });
   }
 
-  const scopeFilter = adminSchoolFilter(req, 'cu.school');
   const [matchingCourse] = await pool.query(
     `SELECT cu.id FROM course_units cu
-     JOIN lecturers l ON l.id = ? AND l.school = cu.school
-     WHERE cu.id = ?${scopeFilter.sql}`,
-    [lecturerId, courseUnitId, ...scopeFilter.params]
+     JOIN lecturers l ON l.id = ? AND l.university_code = cu.university_code AND l.school = cu.school
+     WHERE cu.id = ? AND cu.university_code = ? AND cu.school = ?`,
+    [lecturerId, courseUnitId, req.user.university_code, req.user.school]
   );
   if (!matchingCourse.length) {
-    return res.status(400).json({ error: 'Choose a lecturer from the course unit’s school' });
+    return res.status(400).json({ error: 'Choose a course unit and lecturer from your university and school' });
+  }
+  if (coordinatorId !== null) {
+    const [coordinators] = await pool.query(
+      `SELECT id FROM admins
+       WHERE id = ? AND role = 'COORDINATOR' AND university_code = ? AND school = ?`,
+      [coordinatorId, req.user.university_code, req.user.school]
+    );
+    if (!coordinators.length) {
+      return res.status(400).json({ error: 'Choose a Lecture Coordinator from your university and school' });
+    }
   }
 
   const [result] = await pool.query(
     `UPDATE class_schedules cs
      JOIN course_units cu ON cu.id = cs.course_unit_id
-     SET cs.course_unit_id = ?, cs.lecturer_id = ?, cs.day_of_week = ?,
+     SET cs.course_unit_id = ?, cs.lecturer_id = ?, cs.coordinator_id = ?, cs.day_of_week = ?,
          cs.start_time = ?, cs.end_time = ?, cs.room = ?, cs.program = ?
-     WHERE cs.id = ?${scopeFilter.sql}`,
+     WHERE cs.id = ? AND cu.university_code = ? AND cu.school = ?`,
     [
-      courseUnitId, lecturerId, dayOfWeek, `${startTime}:00`, `${endTime}:00`,
-      room.trim(), program, scheduleId, ...scopeFilter.params
+      courseUnitId, lecturerId, coordinatorId, dayOfWeek, `${startTime}:00`, `${endTime}:00`,
+      room.trim(), program, scheduleId, req.user.university_code, req.user.school
     ]
   );
   if (!result.affectedRows) {
     const [existing] = await pool.query(
       `SELECT cs.id FROM class_schedules cs
        JOIN course_units cu ON cu.id = cs.course_unit_id
-       WHERE cs.id = ?${scopeFilter.sql}`,
-      [scheduleId, ...scopeFilter.params]
+       WHERE cs.id = ? AND cu.university_code = ? AND cu.school = ?`,
+      [scheduleId, req.user.university_code, req.user.school]
     );
     if (!existing.length) return res.status(404).json({ error: 'Class schedule not found' });
   }
   return res.json({ ok: true });
 }));
 
-app.delete('/api/admin/classes/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.post('/api/schooladmin/assign-coordinator', isSchoolAdmin, asyncRoute(async (req, res) => {
+  const scheduleId = Number(req.body.classScheduleId ?? req.body.scheduleId);
+  const coordinatorId = req.body.coordinatorId === null || req.body.coordinatorId === '' ||
+    req.body.coordinatorId === undefined
+    ? null
+    : Number(req.body.coordinatorId);
+
+  if (!Number.isInteger(scheduleId) || scheduleId < 1 ||
+      (coordinatorId !== null && (!Number.isInteger(coordinatorId) || coordinatorId < 1))) {
+    return res.status(400).json({ error: 'Choose a valid class schedule and Lecture Coordinator' });
+  }
+
+  const [schedules] = await pool.query(
+    `SELECT cs.id
+     FROM class_schedules cs
+     JOIN course_units cu ON cu.id = cs.course_unit_id
+     WHERE cs.id = ? AND cu.university_code = ? AND cu.school = ?`,
+    [scheduleId, req.user.university_code, req.user.school]
+  );
+  if (!schedules.length) {
+    return res.status(404).json({ error: 'Class schedule not found in your school' });
+  }
+
+  if (coordinatorId !== null) {
+    const [coordinators] = await pool.query(
+      `SELECT id FROM admins
+       WHERE id = ? AND role = 'COORDINATOR' AND university_code = ? AND school = ?`,
+      [coordinatorId, req.user.university_code, req.user.school]
+    );
+    if (!coordinators.length) {
+      return res.status(400).json({ error: 'Assign a Lecture Coordinator from your university and school' });
+    }
+  }
+
+  await pool.query(
+    'UPDATE class_schedules SET coordinator_id = ? WHERE id = ?',
+    [coordinatorId, scheduleId]
+  );
+  return res.json({ ok: true, classScheduleId: scheduleId, coordinatorId });
+}));
+
+app.delete('/api/admin/classes/:id', isSchoolAdmin, asyncRoute(async (req, res) => {
   const scheduleId = Number(req.params.id);
   if (!Number.isInteger(scheduleId) || scheduleId < 1) {
     return res.status(400).json({ error: 'A valid class schedule is required' });
   }
-  const scopeFilter = adminSchoolFilter(req, 'cu.school');
   const [result] = await pool.query(
     `DELETE cs FROM class_schedules cs
      JOIN course_units cu ON cu.id = cs.course_unit_id
-     WHERE cs.id = ?${scopeFilter.sql}`,
-    [scheduleId, ...scopeFilter.params]
+     WHERE cs.id = ? AND cu.university_code = ? AND cu.school = ?`,
+    [scheduleId, req.user.university_code, req.user.school]
   );
   if (!result.affectedRows) return res.status(404).json({ error: 'Class schedule not found' });
   return res.json({ ok: true });
 }));
 
-app.post('/api/admin/broadcast', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.post('/api/admin/broadcast', isSchoolAdmin, asyncRoute(async (req, res) => {
   const text = typeof req.body.text === 'string' ? req.body.text.trim() : '';
   const targetRoom = typeof req.body.target_room === 'string' ? req.body.target_room : '';
-  const requestedTargetSchool = req.body.target_school === undefined ? 'ALL' : req.body.target_school;
+  const requestedTargetSchool = req.body.target_school === undefined ? req.user.school : req.body.target_school;
   const targetSchool = requestedTargetSchool;
   if (!text || text.length > 2000) {
     return res.status(400).json({ error: 'Broadcasts must be between 1 and 2000 characters' });
@@ -1936,9 +2448,9 @@ app.post('/api/admin/broadcast', authSchoolAdmin, asyncRoute(async (req, res) =>
   if (!isValidTargetRoom(targetRoom)) {
     return res.status(400).json({ error: 'Choose a valid broadcast target' });
   }
-  if (!isOneOf(targetSchool, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other', 'ALL']) ||
-      (!isSuperAdmin(req) && !['ALL', req.user.school].includes(targetSchool))) {
-    return res.status(403).json({ error: 'You can only target your own school or the whole university' });
+  if (!isOneOf(targetSchool, [...schoolCodes, 'ALL']) ||
+      !['ALL', req.user.school].includes(targetSchool)) {
+    return res.status(403).json({ error: 'You can only target your own school or your university' });
   }
   if (targetSchool === 'ALL' && targetRoom !== 'GLOBAL') {
     return res.status(400).json({ error: 'University-wide broadcasts must use the Global chat room' });
@@ -1949,16 +2461,16 @@ app.post('/api/admin/broadcast', authSchoolAdmin, asyncRoute(async (req, res) =>
       return res.status(400).json({ error: 'The broadcast school must match the selected chat room' });
     }
   }
-  if (!isSuperAdmin(req) && targetRoom !== 'GLOBAL' && !targetRoom.startsWith(`${req.user.school}-`)) {
+  if (targetRoom !== 'GLOBAL' && !targetRoom.startsWith(`${req.user.school}-`)) {
     return res.status(403).json({ error: 'You can only broadcast to chat groups in your school' });
   }
   const [result] = await pool.query(
-    `INSERT INTO messages (sender_id, sender_name, text, is_broadcast, target_room, target_school)
-     VALUES (NULL, ?, ?, TRUE, ?, ?)`,
-    ['Admin', text, targetRoom, targetSchool]
+    `INSERT INTO messages (sender_id, sender_name, text, is_broadcast, target_room, university_code, target_school)
+     VALUES (NULL, ?, ?, TRUE, ?, ?, ?)`,
+    ['Admin', text, targetRoom, req.user.university_code, targetSchool]
   );
   try {
-    const recipients = await getBroadcastStudentIds(targetRoom, targetSchool);
+    const recipients = await getBroadcastStudentIds(targetRoom, targetSchool, req.user.university_code);
     await sendPushToStudents(recipients, {
       title: targetSchool === 'ALL' ? 'University update' : `${targetSchool} update`,
       body: text,
@@ -1970,12 +2482,12 @@ app.post('/api/admin/broadcast', authSchoolAdmin, asyncRoute(async (req, res) =>
   return res.status(201).json({ id: result.insertId });
 }));
 
-app.get('/api/admin/messages', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.get('/api/admin/messages', isSchoolAdmin, asyncRoute(async (req, res) => {
   const targetRoom = typeof req.query.target_room === 'string' ? req.query.target_room : '';
   if (!isValidTargetRoom(targetRoom)) {
     return res.status(400).json({ error: 'Choose a valid chat room' });
   }
-  if (!isSuperAdmin(req) && targetRoom !== 'GLOBAL' && !targetRoom.startsWith(`${req.user.school}-`)) {
+  if (targetRoom !== 'GLOBAL' && !targetRoom.startsWith(`${req.user.school}-`)) {
     return res.status(403).json({ error: 'You can only view chat rooms in your school' });
   }
   const [messages] = await pool.query(
@@ -1985,29 +2497,28 @@ app.get('/api/admin/messages', authSchoolAdmin, asyncRoute(async (req, res) => {
      FROM messages m
      LEFT JOIN students s ON s.id = m.sender_id
      WHERE m.course_unit_id IS NULL
+       AND m.university_code = ?
        AND (m.target_room = ? OR (? <> 'GLOBAL' AND m.target_room = 'GLOBAL'))
-       ${isSuperAdmin(req) ? '' : 'AND m.target_school IN (?, \'ALL\')'}
+       AND m.target_school IN (?, 'ALL')
      ORDER BY m.created_at DESC, m.id DESC
      LIMIT 100`,
-    [
-      targetRoom, targetRoom,
-      ...(!isSuperAdmin(req) ? [req.user.school] : [])
-    ]
+    [req.user.university_code, targetRoom, targetRoom, req.user.school]
   );
   return res.json(formatMessages(messages));
 }));
 
-app.get('/api/admin/broadcasts', authSchoolAdmin, asyncRoute(async (req, res) => {
-  const scopeFilter = adminSchoolFilter(req, 'target_school');
+app.get('/api/admin/broadcasts', isSchoolAdmin, asyncRoute(async (req, res) => {
   const [messages] = await pool.query(
     `SELECT id, sender_name AS senderName, text,
             is_broadcast AS isBroadcast, target_room AS targetRoom, target_school AS targetSchool,
             created_at AS createdAt
      FROM messages
-     WHERE is_broadcast = TRUE${scopeFilter.sql ? ` AND (${scopeFilter.sql.replace(/^ AND /, '')} OR target_school = 'ALL')` : ''}
+     WHERE is_broadcast = TRUE
+       AND university_code = ?
+       AND (target_school = ? OR target_school = 'ALL')
      ORDER BY created_at DESC, id DESC
      LIMIT 100`,
-    scopeFilter.params
+    [req.user.university_code, req.user.school]
   );
   return res.json(messages.map((message) => ({
     ...message,
@@ -2015,77 +2526,83 @@ app.get('/api/admin/broadcasts', authSchoolAdmin, asyncRoute(async (req, res) =>
   })));
 }));
 
-app.get('/api/admin/chat-options', authSchoolAdmin, asyncRoute(async (req, res) => {
-  const scopeFilter = adminSchoolFilter(req, 'school');
+app.get('/api/admin/chat-options', isSchoolAdmin, asyncRoute(async (req, res) => {
   const [degreePrograms] = await pool.query(
     `SELECT DISTINCT degree_program AS degreeProgram
      FROM students
-     WHERE degree_program IS NOT NULL AND TRIM(degree_program) <> ''${scopeFilter.sql}
-     ORDER BY degree_program`
-    , scopeFilter.params
+     WHERE university_code = ? AND school = ?
+       AND degree_program IS NOT NULL AND TRIM(degree_program) <> ''
+     ORDER BY degree_program`,
+    [req.user.university_code, req.user.school]
   );
   return res.json({ degreePrograms: degreePrograms.map((row) => row.degreeProgram) });
 }));
 
-app.get('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.get('/api/admin/course-units', isSchoolAdmin, asyncRoute(async (req, res) => {
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   if (req.query.search !== undefined && typeof req.query.search !== 'string') {
     return res.status(400).json({ error: 'Search must be a single text value' });
   }
   if (search.length > 100) return res.status(400).json({ error: 'Search must be 100 characters or fewer' });
-  const scopeFilter = adminSchoolFilter(req, 'cu.school');
-  const searchFilter = search
-    ? `WHERE (cu.code LIKE ? OR cu.name LIKE ?)${scopeFilter.sql}`
-    : scopeFilter.sql ? `WHERE ${scopeFilter.sql.trim().replace(/^AND /, '')}` : '';
+  const searchFilter = search ? 'AND (cu.code LIKE ? OR cu.name LIKE ?)' : '';
   const searchPattern = `%${search}%`;
   const [units] = await pool.query(
-    `SELECT cu.id, cu.code, cu.name, cu.school, cu.degree_program AS degreeProgram,
+    `SELECT cu.id, cu.code, cu.name, cu.university_code AS universityCode, cu.school,
+            cu.degree_program AS degreeProgram,
             cu.academic_level AS academicLevel,
             cu.year_of_study AS yearOfStudy, cu.semester, cu.lecturer_id AS lecturerId,
             cu.coordinator_id AS coordinatorId, ca.email AS coordinatorEmail,
             cu.is_public AS isPublic
      FROM course_units cu
      LEFT JOIN admins ca ON ca.id = cu.coordinator_id
-     ${searchFilter}
+     WHERE cu.university_code = ? AND cu.school = ?
+       ${searchFilter}
      ORDER BY cu.code`,
-    [...(search ? [searchPattern, searchPattern] : []), ...scopeFilter.params]
+    [
+      req.user.university_code,
+      req.user.school,
+      ...(search ? [searchPattern, searchPattern] : [])
+    ]
   );
   return res.json(units);
 }));
 
-app.get('/api/admin/students', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.get('/api/admin/students', isSchoolAdmin, asyncRoute(async (req, res) => {
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   if (req.query.search !== undefined && typeof req.query.search !== 'string') {
     return res.status(400).json({ error: 'Search must be a single text value' });
   }
   if (search.length > 100) return res.status(400).json({ error: 'Search must be 100 characters or fewer' });
-  const scopeFilter = adminSchoolFilter(req, 's.school');
   const searchFilter = search
-    ? `WHERE (s.first_name LIKE ? OR s.last_name LIKE ? OR CONCAT(s.first_name, " ", s.last_name) LIKE ? OR s.student_number LIKE ? OR s.degree_program LIKE ?)${scopeFilter.sql}`
-    : scopeFilter.sql ? `WHERE ${scopeFilter.sql.trim().replace(/^AND /, '')}` : '';
+    ? 'AND (s.first_name LIKE ? OR s.last_name LIKE ? OR CONCAT(s.first_name, " ", s.last_name) LIKE ? OR s.student_number LIKE ? OR s.degree_program LIKE ?)'
+    : '';
   const searchPattern = `%${search}%`;
   const [students] = await pool.query(
     `SELECT s.id, s.first_name AS firstName, s.last_name AS lastName,
-            s.student_number AS studentNumber, s.email, s.school,
+            s.student_number AS studentNumber, s.email,
+            s.university_code AS universityCode, s.school,
             s.degree_program AS degreeProgram, s.academic_level AS academicLevel, s.program,
             s.year_of_study AS yearOfStudy, s.semester, s.created_at AS createdAt
      FROM students s
-     ${searchFilter}
+     WHERE s.university_code = ? AND s.school = ?
+       ${searchFilter}
      ORDER BY s.last_name, s.first_name
      LIMIT 500`,
     [
+      req.user.university_code,
+      req.user.school,
       ...(search
         ? [searchPattern, searchPattern, searchPattern, searchPattern, searchPattern]
-        : []),
-      ...scopeFilter.params
+        : [])
     ]
   );
   return res.json(students);
 }));
 
-app.post('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.post('/api/admin/course-units', isSchoolAdmin, asyncRoute(async (req, res) => {
   const { code, name } = req.body;
-  const school = isSuperAdmin(req) ? req.body.school : req.user.school;
+  const universityCode = req.user.university_code;
+  const school = req.user.school;
   const isPublic = req.body.isPublic === undefined ? false : req.body.isPublic;
   const academicLevel = req.body.academicLevel;
   const degreeProgram = normalizeDegreeProgram(req.body.degreeProgram);
@@ -2097,26 +2614,25 @@ app.post('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res)
       typeof name !== 'string' || !name.trim() ||
       !degreeProgram ||
       !isOneOf(academicLevel, ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD']) ||
-      !isOneOf(school, ['SCI', 'SBA', 'SOSS', 'LAW', 'Nursing', 'EDU', 'Other']) ||
       typeof isPublic !== 'boolean' ||
       !Number.isInteger(yearOfStudy) || yearOfStudy < 1 || yearOfStudy > 5 ||
       !Number.isInteger(semester) || ![1, 2].includes(semester) ||
       (lecturerId !== null && (!Number.isInteger(lecturerId) || lecturerId < 1))) {
-    return res.status(400).json({ error: 'Enter a valid code, name, academic level, degree program, school, year, and semester' });
+    return res.status(400).json({ error: 'Enter a valid code, name, academic level, degree program, year, and semester' });
   }
   if (lecturerId !== null) {
     const [lecturers] = await pool.query(
-      'SELECT id FROM lecturers WHERE id = ? AND school = ?',
-      [lecturerId, school]
+      'SELECT id FROM lecturers WHERE id = ? AND university_code = ? AND school = ?',
+      [lecturerId, universityCode, school]
     );
-    if (!lecturers.length) return res.status(404).json({ error: 'Lecturer account not found' });
+    if (!lecturers.length) return res.status(404).json({ error: 'Lecturer account not found in your school' });
   }
   try {
     const [result] = await pool.query(
       `INSERT INTO course_units
-         (code, name, school, degree_program, academic_level, year_of_study, semester, lecturer_id, is_public)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [code.trim(), name.trim(), school, degreeProgram, academicLevel, yearOfStudy, semester, lecturerId, isPublic]
+         (code, name, university_code, school, degree_program, academic_level, year_of_study, semester, lecturer_id, is_public)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [code.trim(), name.trim(), universityCode, school, degreeProgram, academicLevel, yearOfStudy, semester, lecturerId, isPublic]
     );
     return res.status(201).json({ id: result.insertId });
   } catch (error) {
@@ -2127,7 +2643,68 @@ app.post('/api/admin/course-units', authSchoolAdmin, asyncRoute(async (req, res)
   }
 }));
 
-app.put('/api/admin/course-units/:id/lecturer', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.put('/api/admin/course-units/:id', isSchoolAdmin, asyncRoute(async (req, res) => {
+  const courseUnitId = Number(req.params.id);
+  const { code, name } = req.body;
+  const universityCode = req.user.university_code;
+  const school = req.user.school;
+  const isPublic = req.body.isPublic === undefined ? false : req.body.isPublic;
+  const academicLevel = req.body.academicLevel;
+  const degreeProgram = normalizeDegreeProgram(req.body.degreeProgram);
+  const yearOfStudy = Number(req.body.yearOfStudy);
+  const semester = Number(req.body.semester);
+  const lecturerId = req.body.lecturerId === '' || req.body.lecturerId === null ||
+    req.body.lecturerId === undefined ? null : Number(req.body.lecturerId);
+
+  if (!Number.isInteger(courseUnitId) || courseUnitId < 1 ||
+      typeof code !== 'string' || !code.trim() ||
+      typeof name !== 'string' || !name.trim() ||
+      !degreeProgram ||
+      !isOneOf(academicLevel, ['Certificate', 'Diploma', 'Degree', 'Masters', 'PhD']) ||
+      typeof isPublic !== 'boolean' ||
+      !Number.isInteger(yearOfStudy) || yearOfStudy < 1 || yearOfStudy > 5 ||
+      !Number.isInteger(semester) || ![1, 2].includes(semester) ||
+      (lecturerId !== null && (!Number.isInteger(lecturerId) || lecturerId < 1))) {
+    return res.status(400).json({ error: 'Enter a valid code, name, academic level, degree program, year, and semester' });
+  }
+
+  if (lecturerId !== null) {
+    const [lecturers] = await pool.query(
+      'SELECT id FROM lecturers WHERE id = ? AND university_code = ? AND school = ?',
+      [lecturerId, universityCode, school]
+    );
+    if (!lecturers.length) return res.status(404).json({ error: 'Lecturer account not found in your school' });
+  }
+
+  try {
+    const [result] = await pool.query(
+      `UPDATE course_units
+       SET code = ?, name = ?, degree_program = ?, academic_level = ?,
+           year_of_study = ?, semester = ?, lecturer_id = ?, is_public = ?
+       WHERE id = ? AND university_code = ? AND school = ?`,
+      [
+        code.trim(), name.trim(), degreeProgram, academicLevel,
+        yearOfStudy, semester, lecturerId, isPublic,
+        courseUnitId, universityCode, school
+      ]
+    );
+    if (!result.affectedRows) {
+      const [existing] = await pool.query(
+        'SELECT id FROM course_units WHERE id = ? AND university_code = ? AND school = ?',
+        [courseUnitId, universityCode, school]
+      );
+      if (!existing.length) return res.status(404).json({ error: 'Course unit not found' });
+    }
+    return res.json({ ok: true });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'A matching course unit already exists' });
+    }
+    throw error;
+  }
+}));
+
+app.put('/api/admin/course-units/:id/lecturer', isSchoolAdmin, asyncRoute(async (req, res) => {
   const courseUnitId = Number(req.params.id);
   const lecturerId = req.body.lecturerId === null || req.body.lecturerId === ''
     ? null
@@ -2139,35 +2716,35 @@ app.put('/api/admin/course-units/:id/lecturer', authSchoolAdmin, asyncRoute(asyn
   if (lecturerId !== null) {
     const [lecturers] = await pool.query(
       `SELECT l.id FROM lecturers l
-       JOIN course_units cu ON cu.school = l.school
-       WHERE l.id = ? AND cu.id = ?${isSuperAdmin(req) ? '' : ' AND cu.school = ?'}`,
-      [lecturerId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+       JOIN course_units cu ON cu.university_code = l.university_code AND cu.school = l.school
+       WHERE l.id = ? AND cu.id = ? AND cu.university_code = ? AND cu.school = ?`,
+      [lecturerId, courseUnitId, req.user.university_code, req.user.school]
     );
     if (!lecturers.length) {
-      return res.status(400).json({ error: 'Assign a lecturer from the same school as the course' });
+      return res.status(400).json({ error: 'Assign a lecturer from the same university and school as the course' });
     }
   }
-  const courseScope = isSuperAdmin(req) ? '' : ' AND school = ?';
-  const courseParams = [lecturerId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])];
   const [result] = await pool.query(
-    `UPDATE course_units SET lecturer_id = ? WHERE id = ?${courseScope}`,
-    courseParams
+    'UPDATE course_units SET lecturer_id = ? WHERE id = ? AND university_code = ? AND school = ?',
+    [lecturerId, courseUnitId, req.user.university_code, req.user.school]
   );
   if (!result.affectedRows) {
     const [courses] = await pool.query(
-      `SELECT id FROM course_units WHERE id = ?${isSuperAdmin(req) ? '' : ' AND school = ?'}`,
-      [courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+      'SELECT id FROM course_units WHERE id = ? AND university_code = ? AND school = ?',
+      [courseUnitId, req.user.university_code, req.user.school]
     );
     if (!courses.length) return res.status(404).json({ error: 'Course unit not found' });
   }
   await pool.query(
-    `UPDATE class_schedules SET lecturer_id = ? WHERE course_unit_id = ?${isSuperAdmin(req) ? '' : ' AND course_unit_id IN (SELECT id FROM course_units WHERE school = ?)'}`,
-    [lecturerId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+    `UPDATE class_schedules SET lecturer_id = ?
+     WHERE course_unit_id = ?
+       AND course_unit_id IN (SELECT id FROM course_units WHERE university_code = ? AND school = ?)`,
+    [lecturerId, courseUnitId, req.user.university_code, req.user.school]
   );
   return res.json({ ok: true });
 }));
 
-app.put('/api/admin/course-units/:id/coordinator', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.put('/api/admin/course-units/:id/coordinator', isSchoolAdmin, asyncRoute(async (req, res) => {
   const courseUnitId = Number(req.params.id);
   const coordinatorId = req.body.coordinatorId === null || req.body.coordinatorId === ''
     ? null
@@ -2179,30 +2756,40 @@ app.put('/api/admin/course-units/:id/coordinator', authSchoolAdmin, asyncRoute(a
   if (coordinatorId !== null) {
     const [coordinators] = await pool.query(
       `SELECT a.id FROM admins a
-       JOIN course_units cu ON cu.school = a.school
-       WHERE a.id = ? AND cu.id = ? AND a.role = 'COORDINATOR'${isSuperAdmin(req) ? '' : ' AND cu.school = ?'}`,
-      [coordinatorId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+       JOIN course_units cu ON cu.university_code = a.university_code AND cu.school = a.school
+       WHERE a.id = ? AND cu.id = ? AND a.role = 'COORDINATOR'
+         AND cu.university_code = ? AND cu.school = ?`,
+      [coordinatorId, courseUnitId, req.user.university_code, req.user.school]
     );
     if (!coordinators.length) {
-      return res.status(400).json({ error: 'Assign a Lecture Coordinator from the same school as the course' });
+      return res.status(400).json({ error: 'Assign a Lecture Coordinator from the same university and school as the course' });
     }
   }
-  const courseScope = isSuperAdmin(req) ? '' : ' AND school = ?';
   const [result] = await pool.query(
-    `UPDATE course_units SET coordinator_id = ? WHERE id = ?${courseScope}`,
-    [coordinatorId, courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+    'UPDATE course_units SET coordinator_id = ? WHERE id = ? AND university_code = ? AND school = ?',
+    [coordinatorId, courseUnitId, req.user.university_code, req.user.school]
   );
   if (!result.affectedRows) {
     const [courses] = await pool.query(
-      `SELECT id FROM course_units WHERE id = ?${courseScope}`,
-      [courseUnitId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+      'SELECT id FROM course_units WHERE id = ? AND university_code = ? AND school = ?',
+      [courseUnitId, req.user.university_code, req.user.school]
     );
     if (!courses.length) return res.status(404).json({ error: 'Course unit not found' });
   }
   return res.json({ ok: true });
 }));
 
-app.get('/api/examofficer/exams', authExamOfficer, asyncRoute(async (req, res) => {
+app.get('/api/examofficer/me', isExamOfficer, (req, res) => {
+  return res.json({
+    id: req.user.admin_id,
+    name: req.user.name,
+    role: req.user.role,
+    university_code: req.user.university_code,
+    school: null
+  });
+});
+
+app.get('/api/examofficer/exams', isExamOfficer, asyncRoute(async (req, res) => {
   const [exams] = await pool.query(
     `SELECT e.id, e.exam_date AS examDate, e.start_time AS startTime,
             e.end_time AS endTime, e.room, e.program, e.status,
@@ -2212,19 +2799,22 @@ app.get('/api/examofficer/exams', authExamOfficer, asyncRoute(async (req, res) =
      FROM exams e
      JOIN course_units cu ON cu.id = e.course_unit_id
      LEFT JOIN lecturers l ON l.id = e.invigilator_id
-     ORDER BY e.exam_date, e.start_time, cu.code`
+     WHERE cu.university_code = ?
+     ORDER BY e.exam_date, e.start_time, cu.code`,
+    [req.user.university_code]
   );
   return res.json(exams);
 }));
 
-app.get('/api/examofficer/lecturers', authExamOfficer, asyncRoute(async (req, res) => {
+app.get('/api/examofficer/lecturers', isExamOfficer, asyncRoute(async (req, res) => {
   const [lecturers] = await pool.query(
-    'SELECT id, name, email, school FROM lecturers ORDER BY name'
+    'SELECT id, name, email, school FROM lecturers WHERE university_code = ? ORDER BY name',
+    [req.user.university_code]
   );
   return res.json(lecturers);
 }));
 
-app.put('/api/examofficer/exams/:id/assign', authExamOfficer, asyncRoute(async (req, res) => {
+app.put('/api/examofficer/exams/:id/assign', isExamOfficer, asyncRoute(async (req, res) => {
   const examId = Number(req.params.id);
   const invigilatorId = Number(req.body.invigilatorId);
   const room = typeof req.body.room === 'string' ? req.body.room.trim() : '';
@@ -2235,16 +2825,19 @@ app.put('/api/examofficer/exams/:id/assign', authExamOfficer, asyncRoute(async (
   }
 
   const [exams] = await pool.query(
-    'SELECT id FROM exams WHERE id = ?',
-    [examId]
+    `SELECT e.id
+     FROM exams e
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     WHERE e.id = ? AND cu.university_code = ?`,
+    [examId, req.user.university_code]
   );
-  if (!exams.length) return res.status(404).json({ error: 'Exam not found' });
+  if (!exams.length) return res.status(404).json({ error: 'Exam not found in your university' });
   const [lecturers] = await pool.query(
-    'SELECT id FROM lecturers WHERE id = ?',
-    [invigilatorId]
+    'SELECT id FROM lecturers WHERE id = ? AND university_code = ?',
+    [invigilatorId, req.user.university_code]
   );
   if (!lecturers.length) {
-    return res.status(400).json({ error: 'Choose a valid lecturer as the invigilator' });
+    return res.status(400).json({ error: 'Choose a valid lecturer from your university as the invigilator' });
   }
 
   await pool.query(
@@ -2256,7 +2849,7 @@ app.put('/api/examofficer/exams/:id/assign', authExamOfficer, asyncRoute(async (
   return res.json({ ok: true, status: 'SCHEDULED' });
 }));
 
-app.get('/api/examofficer/cases', authExamOfficer, asyncRoute(async (req, res) => {
+app.get('/api/examofficer/cases', isExamOfficer, asyncRoute(async (req, res) => {
   const [cases] = await pool.query(
     `SELECT mc.id, mc.exam_id AS examId, mc.student_id AS studentId,
             mc.reported_by AS reportedBy, mc.description, mc.status,
@@ -2270,12 +2863,14 @@ app.get('/api/examofficer/cases', authExamOfficer, asyncRoute(async (req, res) =
      JOIN exams e ON e.id = mc.exam_id
      JOIN course_units cu ON cu.id = e.course_unit_id
      JOIN lecturers l ON l.id = mc.reported_by
-     ORDER BY mc.created_at DESC, mc.id DESC`
+     WHERE cu.university_code = ?
+     ORDER BY mc.created_at DESC, mc.id DESC`,
+    [req.user.university_code]
   );
   return res.json(cases);
 }));
 
-app.put('/api/examofficer/cases/:id', authExamOfficer, asyncRoute(async (req, res) => {
+app.put('/api/examofficer/cases/:id', isExamOfficer, asyncRoute(async (req, res) => {
   const caseId = Number(req.params.id);
   const { status } = req.body;
   if (!Number.isInteger(caseId) || caseId < 1 ||
@@ -2283,50 +2878,59 @@ app.put('/api/examofficer/cases/:id', authExamOfficer, asyncRoute(async (req, re
     return res.status(400).json({ error: 'Choose a valid case and resolution status' });
   }
   const [result] = await pool.query(
-    `UPDATE malpractice_cases SET status = ? WHERE id = ?`,
-    [status, caseId]
+    `UPDATE malpractice_cases mc
+     JOIN exams e ON e.id = mc.exam_id
+     JOIN course_units cu ON cu.id = e.course_unit_id
+     SET mc.status = ?
+     WHERE mc.id = ? AND cu.university_code = ?`,
+    [status, caseId, req.user.university_code]
   );
   if (!result.affectedRows) {
     const [existing] = await pool.query(
-      'SELECT id FROM malpractice_cases WHERE id = ?',
-      [caseId]
+      `SELECT mc.id
+       FROM malpractice_cases mc
+       JOIN exams e ON e.id = mc.exam_id
+       JOIN course_units cu ON cu.id = e.course_unit_id
+       WHERE mc.id = ? AND cu.university_code = ?`,
+      [caseId, req.user.university_code]
     );
     if (!existing.length) return res.status(404).json({ error: 'Malpractice case not found' });
   }
   return res.json({ ok: true, status });
 }));
 
-app.get('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.get('/api/admin/exams', isSchoolAdmin, asyncRoute(async (req, res) => {
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
   if (req.query.search !== undefined && typeof req.query.search !== 'string') {
     return res.status(400).json({ error: 'Search must be a single text value' });
   }
   if (search.length > 100) return res.status(400).json({ error: 'Search must be 100 characters or fewer' });
-  const scopeFilter = adminSchoolFilter(req, 'cu.school');
   const searchFilter = search
-    ? `WHERE (cu.code LIKE ? OR cu.name LIKE ? OR e.room LIKE ? OR DATE_FORMAT(e.exam_date, "%Y-%m-%d") LIKE ?)${scopeFilter.sql}`
-    : scopeFilter.sql ? `WHERE ${scopeFilter.sql.trim().replace(/^AND /, '')}` : '';
+    ? 'AND (cu.code LIKE ? OR cu.name LIKE ? OR e.room LIKE ? OR DATE_FORMAT(e.exam_date, "%Y-%m-%d") LIKE ?)'
+    : '';
   const searchPattern = `%${search}%`;
   const [exams] = await pool.query(
     `SELECT e.id, cu.code, cu.name AS courseName, e.exam_date AS examDate,
             e.start_time AS startTime, e.end_time AS endTime, e.room, e.program,
             e.status,
-            e.school, cu.degree_program AS degreeProgram,
+            e.university_code AS universityCode, e.school, cu.degree_program AS degreeProgram,
             e.source_text AS sourceText, e.source_sheet AS sourceSheet,
             e.source_row AS sourceRow, e.source_date_label AS sourceDateLabel
      FROM exams e
      JOIN course_units cu ON cu.id = e.course_unit_id
-     ${searchFilter}
+     WHERE cu.university_code = ? AND cu.school = ?
+       ${searchFilter}
      ORDER BY e.exam_date, e.start_time`,
     [
-      ...(search ? [searchPattern, searchPattern, searchPattern, searchPattern] : []),
-      ...scopeFilter.params
+      req.user.university_code,
+      req.user.school,
+      ...(search ? [searchPattern, searchPattern, searchPattern, searchPattern] : [])
     ]
   );
   return res.json(exams);
 }));
 
-app.post('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.post('/api/admin/exams', isSchoolAdmin, asyncRoute(async (req, res) => {
   const submittedCourseUnitIds = Array.isArray(req.body.courseUnitIds)
     ? req.body.courseUnitIds
     : [req.body.courseUnitId];
@@ -2350,27 +2954,29 @@ app.post('/api/admin/exams', authSchoolAdmin, asyncRoute(async (req, res) => {
 
   const placeholders = courseUnitIds.map(() => '?').join(', ');
   const [units] = await pool.query(
-    `SELECT id, school FROM course_units
-     WHERE id IN (${placeholders})${isSuperAdmin(req) ? '' : ' AND school = ?'}`,
-    [...courseUnitIds, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+    `SELECT id, university_code AS universityCode, school
+     FROM course_units
+     WHERE id IN (${placeholders}) AND university_code = ? AND school = ?`,
+    [...courseUnitIds, req.user.university_code, req.user.school]
   );
   if (units.length !== courseUnitIds.length) {
-    return res.status(404).json({ error: 'One or more course units could not be found' });
+    return res.status(404).json({ error: 'One or more course units could not be found in your school' });
   }
 
-  const values = units.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ');
+  const values = units.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
   const parameters = units.flatMap((unit) => [
-    unit.id, examDate, `${startTime}:00`, `${endTime}:00`, room.trim(), program, unit.school
+    unit.id, examDate, `${startTime}:00`, `${endTime}:00`, room.trim(), program,
+    req.user.university_code, req.user.school
   ]);
   const [result] = await pool.query(
-    `INSERT INTO exams (course_unit_id, exam_date, start_time, end_time, room, program, school)
+    `INSERT INTO exams (course_unit_id, exam_date, start_time, end_time, room, program, university_code, school)
      VALUES ${values}`,
     parameters
   );
   return res.status(201).json({ id: result.insertId, scheduled: result.affectedRows });
 }));
 
-app.put('/api/admin/exams/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.put('/api/admin/exams/:id', isSchoolAdmin, asyncRoute(async (req, res) => {
   const examId = Number(req.params.id);
   const { examDate, startTime, endTime, room, program } = req.body;
   if (!Number.isInteger(examId) || examId < 1 ||
@@ -2383,12 +2989,11 @@ app.put('/api/admin/exams/:id', authSchoolAdmin, asyncRoute(async (req, res) => 
     return res.status(400).json({ error: 'Enter a valid exam date, time range, room, and program' });
   }
 
-  const scopeFilter = isSuperAdmin(req) ? '' : ' AND cu.school = ?';
   const [exams] = await pool.query(
     `SELECT e.id FROM exams e
      JOIN course_units cu ON cu.id = e.course_unit_id
-     WHERE e.id = ?${scopeFilter}`,
-    [examId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+     WHERE e.id = ? AND cu.university_code = ? AND cu.school = ?`,
+    [examId, req.user.university_code, req.user.school]
   );
   if (!exams.length) return res.status(404).json({ error: 'Exam not found in your school' });
 
@@ -2401,15 +3006,15 @@ app.put('/api/admin/exams/:id', authSchoolAdmin, asyncRoute(async (req, res) => 
   return res.json({ ok: true });
 }));
 
-app.delete('/api/admin/exams/:id', authSchoolAdmin, asyncRoute(async (req, res) => {
+app.delete('/api/admin/exams/:id', isSchoolAdmin, asyncRoute(async (req, res) => {
   const examId = Number(req.params.id);
   if (!Number.isInteger(examId) || examId < 1) {
     return res.status(400).json({ error: 'A valid exam is required' });
   }
   await pool.query(
     `DELETE e FROM exams e JOIN course_units cu ON cu.id = e.course_unit_id
-     WHERE e.id = ?${isSuperAdmin(req) ? '' : ' AND cu.school = ?'}`,
-    [examId, ...(!isSuperAdmin(req) ? [req.user.school] : [])]
+     WHERE e.id = ? AND cu.university_code = ? AND cu.school = ?`,
+    [examId, req.user.university_code, req.user.school]
   );
   return res.json({ ok: true });
 }));
@@ -2446,14 +3051,17 @@ try {
   if (!bootstrapAdmins.length) {
     const bootstrapPasswordHash = await bcrypt.hash(adminPassword, 10);
     await pool.query(
-      `INSERT INTO admins (email, password_hash, school, role)
-       VALUES (?, ?, 'ALL', 'SUPER_ADMIN')`,
+      `INSERT INTO admins (name, email, password_hash, role, university_code, school)
+       VALUES ('Platform Owner', ?, ?, 'SUPER_ADMIN', NULL, NULL)`,
       [adminEmail, bootstrapPasswordHash]
     );
   } else if (bootstrapAdmins[0].role !== 'SUPER_ADMIN') {
     throw new Error('ADMIN_EMAIL must belong to a SUPER_ADMIN account');
   } else {
-    await pool.query('UPDATE admins SET school = \'ALL\' WHERE id = ?', [bootstrapAdmins[0].id]);
+    await pool.query(
+      'UPDATE admins SET university_code = NULL, school = NULL WHERE id = ?',
+      [bootstrapAdmins[0].id]
+    );
   }
   app.listen(port, () => {
     console.log(`Exam timetable API running on http://localhost:${port}`);
